@@ -92,6 +92,21 @@ class TotalTimeLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("The Loop is not lost.", message)
 
 
+    async def test_a_health_answer_that_does_not_end_gives_no_warning_and_does_not_stop_the_startup(self):
+        async def handle(request):
+            if request.url.path == "/evalve/health":
+                await asyncio.sleep(3600)
+            return answer()
+
+        backend = Backend(SERVER_URL, KEY, version="0.1.1", transport=httpx.MockTransport(handle))
+        self.addAsyncCleanup(backend.close)
+        with mock.patch("evalve_mcp.backend.FAST_SECONDS", 0.01):
+            async with asyncio.timeout(5):
+                await backend.read_backend_version()
+        self.assertIsNone(backend.warning)
+        self.assertEqual(json.loads(await backend.loop_status("loop-1")), LOOP)
+
+
 class AccountTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_list_gives_a_plain_message_when_the_account_answer_has_no_id(self):
         for me in (httpx.Response(200, text="<html>proxy</html>"), answer(200, {"name": "alyssa"})):

@@ -64,9 +64,11 @@ class Backend:
     async def read_backend_version(self) -> None:
         """Compare the backend version with this package. A health call with no usable answer gives no warning."""
         try:
-            response = await self._client.get(f"{self.server_url}/health", timeout=FAST_SECONDS)
+            # The server waits for this call before it gives the tools. The outer limit applies to the full call.
+            async with asyncio.timeout(FAST_SECONDS):
+                response = await self._client.get(f"{self.server_url}/health", timeout=FAST_SECONDS)
             theirs = response.json()["version"]
-        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError, TypeError):
             return
         if isinstance(theirs, str) and theirs.split(".")[:2] != self.version.split(".")[:2]:
             self.warning = (
