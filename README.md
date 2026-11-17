@@ -2,7 +2,7 @@
 
 The Evalve backend stores loop data. It runs on the same server as Kitaru and keeps its tables in its own database on the same PostgreSQL instance.
 
-This is the backend skeleton: the backend exists and knows who you are. It has two routes and no tables yet. The Loop store comes next.
+The backend applies pending schema migrations before it starts serving requests. Its Loop store preserves committed Loops, Experiments, and Runs across backend restarts. The HTTP API currently exposes the two routes below.
 
 ## Routes
 
@@ -69,6 +69,10 @@ Then check it:
 curl http://127.0.0.1:8100/evalve/health
 curl -H "Authorization: Bearer $KITARU_API_KEY" http://127.0.0.1:8100/evalve/v1/me
 ```
+
+## Shutdown and restore
+
+`evalve down` stops the server and takes a final snapshot of the PostgreSQL instance before destroying the infrastructure. The snapshot includes the separate `evalve` database alongside Kitaru's database. Restoring from that snapshot recovers the Loop state committed when the snapshot was taken. When the backend starts, it applies only schema versions missing from the restored database.
 
 ## Tests
 

@@ -1,4 +1,4 @@
-"""Start the backend: check settings, make sure the database exists, then serve."""
+"""Start the backend: check settings, prepare the database schema, then serve."""
 
 import logging
 import os
@@ -10,6 +10,7 @@ import uvicorn
 
 from evalve_backend import database
 from evalve_backend.app import create_app
+from evalve_backend.migrations import migrate
 from evalve_backend.settings import Settings, SettingsError
 
 logger = logging.getLogger("evalve_backend")
@@ -46,6 +47,13 @@ def main() -> int:
         # The error text can name the host and user. Print only its kind.
         print(f"The database is not reachable ({type(error).__name__}).", file=sys.stderr)
         return 1
+    try:
+        applied = migrate(settings)
+    except psycopg.Error as error:
+        print(f"The database schema could not be migrated ({type(error).__name__}).", file=sys.stderr)
+        return 1
+    if applied:
+        logger.info("Applied database schema versions: %s.", ", ".join(map(str, applied)))
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
     return 0
 
