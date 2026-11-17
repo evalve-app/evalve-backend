@@ -78,6 +78,10 @@ MIGRATIONS = (
     (2, """
         CREATE INDEX loops_created ON loops (created_at DESC, id DESC);
     """),
+    # When the latest start request of a Run was sent. A retry sends a new one after submit_started_at.
+    (3, """
+        ALTER TABLE runs ADD COLUMN start_sent_at timestamptz;
+    """),
 )
 
 

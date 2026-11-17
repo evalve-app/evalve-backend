@@ -15,7 +15,7 @@ Every route sits under `/evalve`, so one hostname can serve Kitaru and Evalve.
 
 The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the account that started a Loop can propose, cancel, or advance it. A status read by another account returns stored results.
 
-Starting, submitting, polling, and cancelling in Kitaru use the Loop steps service from sc-268. Until that service is wired in, requests that need it return `503`; saved Loops are still readable.
+A Loop moves forward only when its owner calls: a start, a status call, a change, or a cancel. Each call takes the Loop's lock, does at most one step in Kitaru with the caller's own key, and returns. The backend has no Kitaru key and no background task, and it never stores or logs the caller's key. When Kitaru can't answer, the call returns `503` and the next call tries again. When another call holds the Loop's lock, a status call returns the stored state.
 
 ## Sign-in
 

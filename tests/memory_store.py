@@ -1,6 +1,7 @@
 """In-memory Store for API and Loop-step tests."""
 
 import json
+import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -8,12 +9,27 @@ from uuid import uuid4
 from evalve_backend.store import LoopStart, RunPlan, StartResult, Store, dump_store_json, validate_transition
 
 
+class _MemoryLock:
+    def __init__(self, lock: threading.Lock):
+        self._lock = lock
+
+    def release(self) -> None:
+        self._lock.release()
+
+
 class MemoryStore(Store):
-    """Single-threaded test double with the same state shape and write guards."""
+    """Test double with the same state shape and write guards. Writes happen one at a time."""
 
     def __init__(self):
         self._loops: dict[str, dict] = {}
         self._starts: dict[tuple[str, str], tuple[str, str]] = {}
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def lock_loop(self, loop_id):
+        with self._locks_guard:
+            lock = self._locks.setdefault(loop_id, threading.Lock())
+        return _MemoryLock(lock) if lock.acquire(blocking=False) else None
 
     def find_start(self, owner, key, request_hash):
         existing = self._starts.get((owner, key))
@@ -56,7 +72,7 @@ class MemoryStore(Store):
         return {
             "number": number, "estimated_cost_usd": plan.estimated_cost_usd,
             "cohort_version_id": plan.cohort_version_id, "agent_version_id": plan.agent_version_id,
-            "submit_started_at": plan.submit_started_at, "run_id": None,
+            "submit_started_at": plan.submit_started_at, "start_sent_at": None, "run_id": None,
             "result": None, "evidence": None, "collected_at": None,
         }
 
@@ -132,6 +148,13 @@ class MemoryStore(Store):
         if parent is None or parent["experiment_id"] not in (None, kitaru_id):
             return False
         parent["experiment_id"] = kitaru_id
+        return True
+
+    def record_start_sent(self, owner, loop_id, experiment, run, sent_at):
+        saved = self._find_run(self._find_experiment(self._running_loop(owner, loop_id), experiment), run)
+        if saved is None or saved["run_id"] is not None:
+            return False
+        saved["start_sent_at"] = sent_at
         return True
 
     def record_run_id(self, owner, loop_id, experiment, run, kitaru_id):

@@ -485,6 +485,18 @@ class DescriptionTest(LoopFixture):
         self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_budget", None))
         self.assertIn("exceed the budget", meta["reason"])
 
+    def test_a_loop_the_caller_ended_reports_that_end(self):
+        # decide still sees a Run to resume. The caller cancelled the Loop or saw a Kitaru error.
+        for ended, reason in (("cancelled", None), ("error", "Kitaru refused the run.")):
+            with self.subTest(ended):
+                meta = loop_rules.result_metadata(self.cfg, self.state, ended=ended, reason=reason)
+                self.assertEqual((meta["status"], meta["winner_lap"], meta["reason"]), (ended, None, reason))
+                self.assertEqual(meta["attempts"], 3)
+
+    def test_an_end_that_is_not_a_stop_is_refused(self):
+        with self.assertRaises(ValueError):
+            loop_rules.result_metadata(self.cfg, self.state, ended="running")
+
 
 class DashboardGoldenTest(LoopFixture):
     """The published lines must parse under the dashboard's rules. See parse_evalve_loop."""
@@ -617,6 +629,36 @@ class NeedsChangeTest(unittest.TestCase):
         self.assertEqual(loop_rules.decide(cfg, state)["action"], "stop_budget")
 
 
+class IncompleteLimitTest(unittest.TestCase):
+    def test_two_incomplete_runs_in_a_row_stop_the_loop(self):
+        cfg, state = config(), new_state()
+        add_run(state, "incomplete")
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "retry")
+        add_run(state, "incomplete")
+        step = loop_rules.decide(cfg, state)
+        self.assertEqual((step["action"], step["reason"]), ("stop_incomplete", "Two Runs in a row could not be scored."))
+        self.assertEqual(loop_rules.end_state(step["action"]), {"status": "failed", "outcome": "error"})
+
+    def test_a_green_run_between_two_incomplete_runs_resets_the_count(self):
+        cfg, state = config(), new_state()
+        for outcome in ("incomplete", "green", "incomplete"):
+            add_run(state, outcome)
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "retry")
+
+    def test_an_incomplete_run_of_the_previous_experiment_does_not_count(self):
+        cfg, state = config(), new_state()
+        add_run(state, "incomplete")
+        add_run(state, "red")
+        add_experiment(state, {"model": "model-b"}, "incomplete")
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "retry")
+
+    def test_the_limit_comes_before_the_budget_and_the_run_cap(self):
+        state = new_state()
+        add_run(state, "incomplete")
+        add_run(state, "incomplete")
+        self.assertEqual(loop_rules.decide(config(budget_usd="0.10", max_runs=2), state)["action"], "stop_incomplete")
+
+
 class IdleLimitTest(unittest.TestCase):
     WAITING_SINCE = datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc)
 
@@ -668,6 +710,7 @@ class EndStateTest(LoopFixture):
             "stop_attempt_cap": ("completed", "max_runs"),
             "stop_budget": ("completed", "budget_reached"),
             "stop_idle": ("completed", "stopped_idle"),
+            "stop_incomplete": ("failed", "error"),
             "cancelled": ("cancelled", "stopped_by_user"),
             "error": ("failed", "error"),
         }
@@ -715,6 +758,11 @@ class EndStateTest(LoopFixture):
 
         reached["stop_budget"] = loop_rules.decide(config(budget_usd="0.10"), state)
         reached["stop_attempt_cap"] = loop_rules.decide(config(max_runs=1), state)
+
+        state = new_state()
+        add_run(state, "incomplete")
+        add_run(state, "incomplete")
+        reached["stop_incomplete"] = loop_rules.decide(config(), state)
 
         for expected, step in reached.items():
             with self.subTest(expected):

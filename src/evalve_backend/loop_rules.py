@@ -29,6 +29,7 @@ END_STATES = {
     "stop_attempt_cap": ("completed", "max_runs"),
     "stop_budget": ("completed", "budget_reached"),
     "stop_idle": ("completed", "stopped_idle"),
+    "stop_incomplete": ("failed", "error"),
     "cancelled": ("cancelled", "stopped_by_user"),
     "error": ("failed", "error"),
 }
@@ -193,7 +194,8 @@ def decide(cfg: dict, state: dict, now: datetime | None = None, waiting_since: d
 
     The module reads no clock. `now` and `waiting_since` (when the last Run of the Experiment was
     collected) are given by the caller. A Loop that needs a change for more than IDLE_LIMIT stops as
-    `stop_idle`. Without both times, the idle limit is not checked.
+    `stop_idle`. Without both times, the idle limit is not checked. Two incomplete Runs in a row stop
+    the Loop as `stop_incomplete` (sc-312), so a broken setup does not use up the run cap or the budget.
     """
     experiments = state["experiments"]
     experiment = experiments[-1] if experiments else None
@@ -212,6 +214,8 @@ def decide(cfg: dict, state: dict, now: datetime | None = None, waiting_since: d
         return decision("collect" if run_id else "resume_start", experiment=experiment["number"], run_id=run_id)
     if summary["green_streak"] >= cfg["required_consecutive_greens"]:
         return decision("stop_success", experiment=experiment["number"])
+    if len(runs) >= 2 and all(run["result"]["outcome"] == "incomplete" for run in runs[-2:]):
+        return decision("stop_incomplete", reason="Two Runs in a row could not be scored.")
     if state.get("budget_stop"):
         return decision("stop_budget", reason=state["budget_stop"])
     if charged >= dollars(cfg["budget_usd"]):
@@ -377,12 +381,23 @@ def experiment_summaries(state: dict) -> list[dict]:
     return result
 
 
-def result_metadata(cfg: dict, state: dict, now: datetime | None = None, waiting_since: datetime | None = None) -> dict:
-    """The body of the `Evalve result:` line. Its words are the ones the dashboard reads."""
+def result_metadata(cfg: dict, state: dict, now: datetime | None = None, waiting_since: datetime | None = None,
+                    *, ended: str | None = None, reason: str | None = None) -> dict:
+    """The body of the `Evalve result:` line. Its words are the ones the dashboard reads.
+
+    `ended` is the stop that ended the Loop (a key of END_STATES or `stop_success`) when the caller
+    already ended it, for example by a cancel or a Kitaru error that `decide` cannot see. Its `reason`
+    replaces the reason of the decision.
+    """
     step = decide(cfg, state, now, waiting_since)
+    status = step["action"] if step["action"].startswith("stop_") else "running"
+    if ended is not None:
+        if ended != "stop_success" and ended not in END_STATES:
+            raise ValueError(f"Not the end of a Loop: {ended!r}")
+        status, step = ended, step | {"reason": reason}
     return {
-        "schema_version": 1, "loop_id": state["loop_id"], "status": step["action"] if step["action"].startswith("stop_") else "running",
-        "winner_lap": step.get("experiment") if step["action"] == "stop_success" else None,
+        "schema_version": 1, "loop_id": state["loop_id"], "status": status,
+        "winner_lap": step.get("experiment") if status == "stop_success" else None,
         "baseline_model": state["control_model"],
         "attempts": step["runs"], "recorded_cost_usd": step["recorded_cost_usd"],
         "accounted_cost_usd": step["accounted_cost_usd"], "reason": step.get("reason"), "laps": experiment_summaries(state),

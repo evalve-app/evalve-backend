@@ -297,8 +297,14 @@ class LoopApiTest(unittest.TestCase):
         self.assertEqual(self.api.get(LOOPS, headers=AUTH, params={"status": "completed"}).json()["items"], [])
         self.assertEqual(self.api.get(LOOPS, headers=AUTH, params={"cursor": "-bad-"}).status_code, 422)
 
-    def test_start_without_an_executor_does_not_create_a_loop(self):
-        with client(FakeKitaru(identity), store=self.store) as api:
+    def test_start_that_kitaru_cannot_check_does_not_create_a_loop(self):
+        # The default Loop steps call Kitaru. Here Kitaru answers only the sign-in check.
+        def sign_in_only(request):
+            if request.url.path == "/api/v1/accounts/me":
+                return identity(request)
+            return httpx.Response(503, json={"detail": "Unavailable."})
+
+        with client(FakeKitaru(sign_in_only), store=self.store) as api:
             reply = api.post(LOOPS, headers=AUTH | {"Idempotency-Key": "start"}, json=START)
             self.assertEqual(reply.status_code, 503)
         self.assertEqual(self.store.list_loops(None), [])

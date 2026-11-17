@@ -5,6 +5,7 @@ An omitted owner scope (None) permits shared reads. Every write requires the Loo
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,7 +48,15 @@ class StartResult:
     loop_id: str | None = None
 
 
+class LoopLock(Protocol):
+    def release(self) -> None: ...
+
+
 class Store(Protocol):
+    def lock_loop(self, loop_id: str) -> LoopLock | None:
+        """Take the Loop's step lock without waiting. None when another call holds it."""
+        ...
+
     def find_start(self, owner: str, key: str, request_hash: str) -> StartResult | None: ...
     def start_loop(self, start: LoopStart, first_run: RunPlan) -> StartResult: ...
     def get_loop(self, owner: str | None, loop_id: str) -> dict | None: ...
@@ -59,6 +68,7 @@ class Store(Protocol):
                        first_run: RunPlan, *, control_model: str | None = None) -> bool: ...
     def add_run(self, owner: str, loop_id: str, experiment: int, number: int, plan: RunPlan) -> bool: ...
     def record_experiment_id(self, owner: str, loop_id: str, experiment: int, kitaru_id: str) -> bool: ...
+    def record_start_sent(self, owner: str, loop_id: str, experiment: int, run: int, sent_at: datetime) -> bool: ...
     def record_run_id(self, owner: str, loop_id: str, experiment: int, run: int, kitaru_id: str) -> bool: ...
     def collect_run(self, owner: str, loop_id: str, experiment: int, run: int, result: dict,
                     collected_at: datetime, *, needs_change: bool) -> bool: ...
@@ -130,12 +140,45 @@ def _insert_run(connection, loop_id, experiment, number, plan: RunPlan) -> None:
           plan.agent_version_id, plan.submit_started_at))
 
 
+def loop_lock_key(loop_id: str) -> int:
+    """The one-bigint advisory lock of a Loop. Migrations use the separate two-integer namespace."""
+    return int.from_bytes(hashlib.sha256(loop_id.encode()).digest()[:8], "big", signed=True)
+
+
+class _AdvisoryLock:
+    """A session advisory lock, held by its own connection until release."""
+
+    def __init__(self, connection: psycopg.Connection, key: int):
+        self._connection = connection
+        self._key = key
+
+    def release(self) -> None:
+        try:
+            self._connection.execute("SELECT pg_advisory_unlock(%s::bigint)", (self._key,))
+        finally:
+            # Closing the session also frees the lock if the unlock failed.
+            self._connection.close()
+
+
 class PostgresStore:
     def __init__(self, settings: Settings):
         self._options = connection_options(settings, settings.db_name)
 
     def _connect(self):
         return psycopg.connect(**self._options, row_factory=dict_row)
+
+    def lock_loop(self, loop_id: str) -> LoopLock | None:
+        key = loop_lock_key(loop_id)
+        connection = psycopg.connect(**self._options, autocommit=True)
+        try:
+            (taken,) = connection.execute("SELECT pg_try_advisory_lock(%s::bigint)", (key,)).fetchone()
+        except BaseException:
+            connection.close()
+            raise
+        if not taken:
+            connection.close()
+            return None
+        return _AdvisoryLock(connection, key)
 
     def find_start(self, owner: str, key: str, request_hash: str) -> StartResult | None:
         with self._connect() as connection:
@@ -184,7 +227,7 @@ class PostgresStore:
             runs_by_experiment = {experiment["number"]: [] for experiment in experiments}
             for run in connection.execute("""
                 SELECT experiment_number, number, estimated_cost_usd, cohort_version_id,
-                       agent_version_id, submit_started_at, run_id, result, collected_at
+                       agent_version_id, submit_started_at, start_sent_at, run_id, result, collected_at
                 FROM runs WHERE loop_id = %s ORDER BY experiment_number, number
             """, (loop_id,)):
                 runs_by_experiment[run.pop("experiment_number")].append(run)
@@ -271,6 +314,15 @@ class PostgresStore:
                 UPDATE experiments SET experiment_id = %s
                 WHERE loop_id = %s AND number = %s AND (experiment_id IS NULL OR experiment_id = %s)
             """, (kitaru_id, loop_id, experiment, kitaru_id)).rowcount == 1
+
+    def record_start_sent(self, owner: str, loop_id: str, experiment: int, run: int, sent_at: datetime) -> bool:
+        with self._connect() as connection:
+            if _lock_running_loop(connection, owner, loop_id) is None:
+                return False
+            return connection.execute("""
+                UPDATE runs SET start_sent_at = %s
+                WHERE loop_id = %s AND experiment_number = %s AND number = %s AND run_id IS NULL
+            """, (sent_at, loop_id, experiment, run)).rowcount == 1
 
     def record_run_id(self, owner: str, loop_id: str, experiment: int, run: int, kitaru_id: str) -> bool:
         try:
