@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evalve-backend"
+version = "0.1.1"
+description = "Stores Evalve loop data next to a Kitaru server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.27,<1",
+    "psycopg[binary]>=3.2,<4",
+    "uvicorn>=0.30,<1",
+]
+
+[project.scripts]
+evalve-backend = "evalve_backend.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evalve_backend"]
