@@ -131,6 +131,9 @@ class KitaruApi:
     async def list_cohort_sessions(self, cohort_version_id: str) -> list[dict]:
         return await self._list("/api/v1/sessions", condition("cohort_version_id", cohort_version_id))
 
+    async def get_agent(self, agent_id: str) -> dict:
+        return await self._get(f"/api/v1/agents/{agent_id}")
+
     async def list_agent_versions(self, agent_id: str) -> list[dict]:
         return await self._list(f"/api/v1/agents/{agent_id}/versions")
 
