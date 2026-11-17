@@ -140,11 +140,11 @@ class _Step:
         if run is not None and run["result"] is None:
             run_id = run["run_id"]
             if run_id is None and experiment["experiment_id"] is not None:
-                # The submit may have started a run whose reply was lost. While the key is held, finding
-                # it can start it, and the cancel below stops it.
+                # The submit may have started a run whose reply was lost. A cancel only looks: sending the
+                # submit again could start a run that skipped the checks.
                 try:
-                    run_id = await self.executor.find_run(experiment["experiment_id"], self.run_spec(experiment, run),
-                                                          self.known_run_ids(), self.now)
+                    run_id = await self.executor.adopt(experiment["experiment_id"], self.run_spec(experiment, run),
+                                                       self.known_run_ids())
                 except AmbiguousRun:
                     # Never cancel a run that may be someone else's.
                     run_id = None

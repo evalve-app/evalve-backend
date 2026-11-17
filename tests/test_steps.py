@@ -170,6 +170,23 @@ class RestartSafetyTest(StepsTest):
         self.assertIn("cannot tell which is its own", self.stored(reply.json()["loop_id"])["reason"])
         self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
 
+    def test_a_cancel_after_a_start_that_never_reached_kitaru_starts_nothing(self):
+        self.kitaru.fail("POST", RUNS, 503)
+        self.assertEqual(self.start().status_code, 503)
+        (loop_id,) = self.store._loops
+        self.assertEqual(self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=OWNER).json()["status"], "cancelled")
+        self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
+        self.assertEqual(self.kitaru.runs, {})
+
+    def test_a_cancel_after_a_lost_start_reply_stops_the_run_without_sending_the_start_again(self):
+        self.kitaru.lose_next_reply("POST", RUNS)
+        self.assertEqual(self.start().status_code, 503)
+        (ours,) = self.kitaru.runs
+        (loop_id,) = self.store._loops
+        self.assertEqual(self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=OWNER).json()["status"], "cancelled")
+        self.assertEqual(self.kitaru.runs[ours]["status"], "canceled")
+        self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
+
     def test_a_cancel_after_the_key_expired_never_cancels_a_run_it_cannot_tell_apart(self):
         self.kitaru.lose_next_reply("POST", RUNS)
         self.assertEqual(self.start().status_code, 503)

@@ -68,8 +68,8 @@ class ExperimentExecutor(Protocol):
         """Return the id of the Experiment, creating it when the store has none."""
         ...
 
-    async def find_run(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str | None:
-        """Return the id of the run that this Run's submit started, if there is one."""
+    async def adopt(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str | None:
+        """Return the id of the one run that fits this Run's submit, if there is one. Starts nothing."""
         ...
 
     async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str:
@@ -162,13 +162,6 @@ class KitaruExecutor:
         if not same:
             raise ExecutionFailed(f"The Kitaru experiment {spec.name} no longer matches the Loop's settings.")
 
-    async def find_run(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str | None:
-        if now - run.submit_started_at < KEY_TRUSTED_FOR:
-            # The same request with the same key returns the run Kitaru started for it. If the first
-            # request never arrived, this starts the run now.
-            return await self._start(experiment_id, run)
-        return await self.adopt(experiment_id, run, known_run_ids)
-
     async def adopt(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str | None:
         """After the key expired: the one run that fits the submit. Someone else can start a run on
         the experiment, so two that fit stop the Loop."""
@@ -184,10 +177,14 @@ class KitaruExecutor:
         return candidates[0] if candidates else None
 
     async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str:
-        # Always look first: the submit may have gone through before a restart.
-        found = await self.find_run(experiment_id, run, known_run_ids, now)
-        if found is not None:
-            return found
+        if now - run.submit_started_at < KEY_TRUSTED_FOR:
+            # The same request with the same key returns the run Kitaru started for it, or starts it if
+            # the first request never arrived.
+            return await self._start(experiment_id, run)
+        # The key may have expired after the submit went through. Look before starting.
+        adopted = await self.adopt(experiment_id, run, known_run_ids)
+        if adopted is not None:
+            return adopted
         return await self._start(experiment_id, run)
 
     async def _start(self, experiment_id: str, run: RunSpec) -> str:
