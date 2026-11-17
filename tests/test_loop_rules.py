@@ -4,9 +4,11 @@ The old tests ran the whole script against a fake Kitaru. These write down what 
 (the `laps[].attempts[].result` state) and check the decision.
 """
 
+import ast
 import copy
 import json
 import unittest
+from pathlib import Path
 from decimal import Decimal
 
 from evalve_backend import loop_rules
@@ -503,6 +505,61 @@ class DashboardGoldenTest(LoopFixture):
                      'Evalve loop: {"schema_version":1,"loop_id":"a","lap":0,"required_consecutive_greens":0}'):
             with self.subTest(text=text):
                 self.assertIsNone(parse_evalve_loop(text))
+
+
+class EndStateTest(LoopFixture):
+    def test_each_stop_has_a_status_and_an_outcome(self):
+        expected = {
+            "stop_success": ("completed", "target_reached"),
+            "stop_attempt_cap": ("completed", "max_runs"),
+            "stop_budget": ("completed", "budget_reached"),
+            "cancelled": ("cancelled", "stopped_by_user"),
+            "error": ("failed", "error"),
+        }
+        for stop, (status, outcome) in expected.items():
+            with self.subTest(stop):
+                self.assertEqual(loop_rules.end_state(stop), {"status": status, "outcome": outcome})
+
+    def test_every_stop_that_decide_returns_has_an_end_state(self):
+        self.state["laps"][1]["attempts"] = [
+            {"number": n, "run_id": f"run-c{n}", "estimated_cost_usd": "0.10", "result": result("green")} for n in (1, 2)
+        ]
+        self.state["laps"][0]["attempts"].pop()
+        stops = {"stop_success": loop_rules.decide(self.cfg, self.state)["action"]}
+
+        self.state["laps"][1]["attempts"] = []
+        self.state["budget_stop"] = "The next replay was estimated at $0.10 and would exceed the budget."
+        stops["stop_budget"] = loop_rules.decide(self.cfg, self.state)["action"]
+
+        self.state["budget_stop"] = None
+        self.cfg["max_attempts"] = 2
+        stops["stop_attempt_cap"] = loop_rules.decide(self.cfg, self.state)["action"]
+
+        for expected, action in stops.items():
+            with self.subTest(expected):
+                self.assertEqual(action, expected)
+                self.assertIn(action, loop_rules.END_STATES)
+
+    def test_an_action_that_is_not_a_stop_has_no_end_state(self):
+        for action in ("start_baseline", "replay", "retry", "start_candidate", "collect", "resume_start", "running"):
+            with self.subTest(action):
+                with self.assertRaises(ValueError):
+                    loop_rules.end_state(action)
+
+
+class PureModuleTest(unittest.TestCase):
+    # Parsing and arithmetic only: nothing here reaches the network, a database or the file system.
+    ALLOWED_IMPORTS = {"__future__", "copy", "decimal", "json", "re", "urllib.parse", "uuid"}
+
+    def test_the_module_imports_nothing_that_does_io(self):
+        tree = ast.parse(Path(loop_rules.__file__).read_text(encoding="utf-8"))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                imported.add(("." * node.level) + (node.module or ""))
+        self.assertEqual(imported - self.ALLOWED_IMPORTS, set())
 
 
 if __name__ == "__main__":

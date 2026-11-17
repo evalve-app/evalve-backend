@@ -16,6 +16,16 @@ from urllib.parse import urlsplit
 SETTINGS_PREFIX = "Evalve loop: "
 RESULT_PREFIX = "Evalve result: "
 
+# The `status` and `outcome` that the store (sc-247) records when a Loop ends. The keys are the stops
+# that `decide` returns, plus a stop by a person or the agent and a broken run or Kitaru error.
+END_STATES = {
+    "stop_success": ("completed", "target_reached"),
+    "stop_attempt_cap": ("completed", "max_runs"),
+    "stop_budget": ("completed", "budget_reached"),
+    "cancelled": ("cancelled", "stopped_by_user"),
+    "error": ("failed", "error"),
+}
+
 
 class ConfigError(ValueError):
     """The Loop settings are not usable. The message says what to fix."""
@@ -351,3 +361,11 @@ def result_metadata(cfg: dict, state: dict) -> dict:
         "attempts": step["attempts"], "recorded_cost_usd": step["recorded_cost_usd"],
         "accounted_cost_usd": step["accounted_cost_usd"], "reason": step.get("reason"), "laps": lap_summaries(state),
     }
+
+
+def end_state(stop: str) -> dict:
+    """The `status` and `outcome` for the end of a Loop. `stop` is a key of END_STATES."""
+    if stop not in END_STATES:
+        raise ValueError(f"Not the end of a Loop: {stop!r}")
+    status, outcome = END_STATES[stop]
+    return {"status": status, "outcome": outcome}
