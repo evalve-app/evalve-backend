@@ -150,9 +150,10 @@ class _Step:
                 except AmbiguousRun:
                     # Never cancel a run that may be someone else's.
                     run_id = None
-                if run_id is None and self.now - run["submit_started_at"] < START_SETTLES_WITHIN:
-                    # A start that timed out can still create its run, so one empty look proves nothing.
-                    # The Loop keeps running and the route asks the caller to try the cancel again.
+                last_sent = run["start_sent_at"] or run["submit_started_at"]
+                if run_id is None and self.now - last_sent < START_SETTLES_WITHIN:
+                    # A start that timed out, the first or a retry, can still create its run, so one empty
+                    # look proves nothing. The Loop keeps running and the route asks the caller to try again.
                     return
                 if run_id is not None:
                     await to_thread(self.store.record_run_id, self.owner, self.loop_id, experiment["number"],
@@ -184,6 +185,8 @@ class _Step:
         await self.check_run_spec()
         experiment_id = await self.executor.ensure_experiment(self.experiment_spec(experiment))
         await to_thread(self.store.record_experiment_id, self.owner, self.loop_id, number, experiment_id)
+        # A cancel waits for this request to settle, so record it before it can be sent.
+        await to_thread(self.store.record_start_sent, self.owner, self.loop_id, number, run["number"], self.now)
         run_id = await self.executor.submit(experiment_id, self.run_spec(experiment, run), self.known_run_ids(), self.now)
         await to_thread(self.store.record_run_id, self.owner, self.loop_id, number, run["number"], run_id)
 

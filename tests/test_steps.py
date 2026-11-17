@@ -145,7 +145,10 @@ class RestartSafetyTest(StepsTest):
 
     def submit_started_ago(self, minutes):
         (loop,) = self.store._loops.values()
-        loop["experiments"][-1]["runs"][-1]["submit_started_at"] -= timedelta(minutes=minutes)
+        run = loop["experiments"][-1]["runs"][-1]
+        run["submit_started_at"] -= timedelta(minutes=minutes)
+        if run["start_sent_at"] is not None:
+            run["start_sent_at"] -= timedelta(minutes=minutes)
 
     def submit_started_16_minutes_ago(self):
         self.submit_started_ago(16)
@@ -186,6 +189,19 @@ class RestartSafetyTest(StepsTest):
         self.assertEqual(self.cancel().json()["status"], "cancelled")
         self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
         self.assertEqual(self.kitaru.runs, {})
+
+    def test_a_cancel_waits_for_a_retried_start_that_timed_out(self):
+        self.kitaru.fail("POST", RUNS, 503)
+        self.assertEqual(self.start().status_code, 503)
+        self.submit_started_ago(5)
+        # A status call five minutes later sends the start again. It times out, but Kitaru creates the run late.
+        self.kitaru.fail("POST", RUNS, 504)
+        (loop_id,) = self.store._loops
+        self.api.get(f"{LOOPS}/{loop_id}", headers=OWNER)
+        self.assertEqual(self.cancel().status_code, 503)
+        late = self.kitaru.add_run(self.stored(loop_id)["experiments"][0]["experiment_id"])["id"]
+        self.assertEqual(self.cancel().json()["status"], "cancelled")
+        self.assertEqual(self.kitaru.runs[late]["status"], "canceled")
 
     def test_a_cancel_stops_a_run_that_a_timed_out_start_creates_late(self):
         self.kitaru.fail("POST", RUNS, 504)

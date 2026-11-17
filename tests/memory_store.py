@@ -72,7 +72,7 @@ class MemoryStore(Store):
         return {
             "number": number, "estimated_cost_usd": plan.estimated_cost_usd,
             "cohort_version_id": plan.cohort_version_id, "agent_version_id": plan.agent_version_id,
-            "submit_started_at": plan.submit_started_at, "run_id": None,
+            "submit_started_at": plan.submit_started_at, "start_sent_at": None, "run_id": None,
             "result": None, "evidence": None, "collected_at": None,
         }
 
@@ -148,6 +148,13 @@ class MemoryStore(Store):
         if parent is None or parent["experiment_id"] not in (None, kitaru_id):
             return False
         parent["experiment_id"] = kitaru_id
+        return True
+
+    def record_start_sent(self, owner, loop_id, experiment, run, sent_at):
+        saved = self._find_run(self._find_experiment(self._running_loop(owner, loop_id), experiment), run)
+        if saved is None or saved["run_id"] is not None:
+            return False
+        saved["start_sent_at"] = sent_at
         return True
 
     def record_run_id(self, owner, loop_id, experiment, run, kitaru_id):

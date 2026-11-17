@@ -68,6 +68,7 @@ class Store(Protocol):
                        first_run: RunPlan, *, control_model: str | None = None) -> bool: ...
     def add_run(self, owner: str, loop_id: str, experiment: int, number: int, plan: RunPlan) -> bool: ...
     def record_experiment_id(self, owner: str, loop_id: str, experiment: int, kitaru_id: str) -> bool: ...
+    def record_start_sent(self, owner: str, loop_id: str, experiment: int, run: int, sent_at: datetime) -> bool: ...
     def record_run_id(self, owner: str, loop_id: str, experiment: int, run: int, kitaru_id: str) -> bool: ...
     def collect_run(self, owner: str, loop_id: str, experiment: int, run: int, result: dict,
                     collected_at: datetime, *, needs_change: bool) -> bool: ...
@@ -226,7 +227,7 @@ class PostgresStore:
             runs_by_experiment = {experiment["number"]: [] for experiment in experiments}
             for run in connection.execute("""
                 SELECT experiment_number, number, estimated_cost_usd, cohort_version_id,
-                       agent_version_id, submit_started_at, run_id, result, collected_at
+                       agent_version_id, submit_started_at, start_sent_at, run_id, result, collected_at
                 FROM runs WHERE loop_id = %s ORDER BY experiment_number, number
             """, (loop_id,)):
                 runs_by_experiment[run.pop("experiment_number")].append(run)
@@ -313,6 +314,15 @@ class PostgresStore:
                 UPDATE experiments SET experiment_id = %s
                 WHERE loop_id = %s AND number = %s AND (experiment_id IS NULL OR experiment_id = %s)
             """, (kitaru_id, loop_id, experiment, kitaru_id)).rowcount == 1
+
+    def record_start_sent(self, owner: str, loop_id: str, experiment: int, run: int, sent_at: datetime) -> bool:
+        with self._connect() as connection:
+            if _lock_running_loop(connection, owner, loop_id) is None:
+                return False
+            return connection.execute("""
+                UPDATE runs SET start_sent_at = %s
+                WHERE loop_id = %s AND experiment_number = %s AND number = %s AND run_id IS NULL
+            """, (sent_at, loop_id, experiment, run)).rowcount == 1
 
     def record_run_id(self, owner: str, loop_id: str, experiment: int, run: int, kitaru_id: str) -> bool:
         try:

@@ -185,6 +185,13 @@ class StoreContract:
         final = self.store.get_loop(OWNER, loop_id)
         self.assertEqual((final["status"], final["outcome"], final["reason"]), ("cancelled", "stopped_by_user", "User"))
 
+    def test_the_latest_start_request_is_recorded_until_the_run_has_an_id(self):
+        loop_id = self.start()
+        self.assertTrue(self.store.record_start_sent(OWNER, loop_id, 0, 1, COLLECTED))
+        self.assertEqual(self.store.get_loop(OWNER, loop_id)["experiments"][0]["runs"][0]["start_sent_at"], COLLECTED)
+        self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
+        self.assertFalse(self.store.record_start_sent(OWNER, loop_id, 0, 1, COLLECTED))
+
 
 class MemoryStoreTest(StoreContract, unittest.TestCase):
     def setUp(self):
@@ -303,10 +310,10 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
             connection.execute("CREATE TABLE evalve_loops (slug text PRIMARY KEY)")
             connection.execute("INSERT INTO evalve_loops VALUES ('pilot')")
         results = race(lambda: migrations.migrate(self.settings), lambda: migrations.migrate(self.settings))
-        self.assertCountEqual(results, [(1, 2), ()])
+        self.assertCountEqual(results, [(1, 2, 3), ()])
         with self.connect() as connection:
             versions = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-            self.assertEqual(versions, [(1,), (2,)])
+            self.assertEqual(versions, [(1,), (2,), (3,)])
             self.assertEqual(connection.execute("SELECT slug FROM evalve_loops").fetchone(), ("pilot",))
 
     def test_upgrade_indexes_existing_loops_across_owners(self):
@@ -318,7 +325,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
         other = self.store.start_loop(
             replace(START, owner_account_id="account-2", slug="other"), PLAN,
         )
-        self.assertEqual(migrations.migrate(self.settings), (2,))
+        self.assertEqual(migrations.migrate(self.settings), (2, 3))
         self.assertEqual(migrations.migrate(self.settings), ())
         with self.connect() as connection:
             index, = connection.execute("SELECT pg_get_indexdef('loops_created'::regclass)").fetchone()
