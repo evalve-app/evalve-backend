@@ -5,32 +5,17 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI
 from fastapi.responses import JSONResponse
 
 from evalve_backend import __version__, database
-from evalve_backend.auth import Account, KitaruUnavailable, NotSignedIn, current_account
+from evalve_backend.auth import Account, require_account
+from evalve_backend.loops_api import router as loops_router
+from evalve_backend.loop_steps import LoopSteps
 from evalve_backend.settings import Settings
+from evalve_backend.store import PostgresStore, Store
 
 PREFIX = "/evalve"
-
-
-async def require_account(
-    request: Request, authorization: Annotated[str | None, Header()] = None
-) -> Account:
-    """Resolve the caller through Kitaru, or refuse the request."""
-    try:
-        return await current_account(request.app.state.kitaru, authorization)
-    except NotSignedIn:
-        raise HTTPException(
-            status_code=401,
-            detail="Sign in to Kitaru and send its credential as a Bearer token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        ) from None
-    except KitaruUnavailable:
-        raise HTTPException(
-            status_code=503, detail="Kitaru could not confirm who is calling. Try again."
-        ) from None
 
 
 def create_app(
@@ -38,6 +23,8 @@ def create_app(
     *,
     kitaru_transport: httpx.AsyncBaseTransport | None = None,
     database_ping: Callable[[Settings], bool] = database.ping,
+    store: Store | None = None,
+    loop_steps: LoopSteps | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -53,6 +40,8 @@ def create_app(
         title="Evalve backend", version=__version__, lifespan=lifespan,
         docs_url=f"{PREFIX}/docs", openapi_url=f"{PREFIX}/openapi.json", redoc_url=None,
     )
+    app.state.loop_store = PostgresStore(settings) if store is None else store
+    app.state.loop_steps = loop_steps
     router = APIRouter(prefix=PREFIX)
 
     @router.get("/health")
@@ -74,4 +63,5 @@ def create_app(
         return account
 
     app.include_router(router)
+    app.include_router(loops_router, prefix=PREFIX)
     return app

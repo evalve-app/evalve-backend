@@ -2,7 +2,7 @@
 
 The Evalve backend stores loop data. It runs on the same server as Kitaru and keeps its tables in its own database on the same PostgreSQL instance.
 
-The backend applies pending schema migrations before it starts serving requests. Its Loop store preserves committed Loops, Experiments, and Runs across backend restarts. The HTTP API currently exposes the two routes below.
+The backend applies pending schema migrations before it starts serving requests. Its Loop store preserves committed Loops, Experiments, and Runs across backend restarts.
 
 ## Routes
 
@@ -12,6 +12,10 @@ Every route sits under `/evalve`, so one hostname can serve Kitaru and Evalve.
 | --- | --- | --- |
 | `GET /evalve/health` | None | `200` with `"database": "ok"` when the backend can query its database. `503` when it can't. Both include `version` and `image`, so a deployment can confirm which build is serving. |
 | `GET /evalve/v1/me` | Kitaru credential | `200 {"id": "...", "name": "..."}` for the Kitaru account behind the credential. |
+
+The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the account that started a Loop can propose, cancel, or advance it. A status read by another account returns stored results.
+
+Starting, submitting, polling, and cancelling in Kitaru use the Loop steps service from sc-268. Until that service is wired in, requests that need it return `503`; saved Loops are still readable.
 
 ## Sign-in
 
@@ -81,6 +85,12 @@ curl -H "Authorization: Bearer $KITARU_API_KEY" http://127.0.0.1:8100/evalve/v1/
 ```
 
 The tests use a fake Kitaru server and a fake database connection, so they need neither. To also run the database tests against a real PostgreSQL, set `EVALVE_TEST_DB_HOST` (and `EVALVE_TEST_DB_PORT`, `EVALVE_TEST_DB_USER`, `EVALVE_TEST_DB_PWD` if they differ from `5432`, `postgres`, `postgres`). CI does this.
+
+Regenerate the checked-in OpenAPI contract when a route changes:
+
+```bash
+PYTHONPATH=tests .venv/bin/python -c 'import json; from evalve_backend.app import create_app; from helpers import settings; print(json.dumps(create_app(settings()).openapi(), indent=2, sort_keys=True))' > openapi/evalve-backend.json
+```
 
 ## Container
 

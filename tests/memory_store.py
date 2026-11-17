@@ -77,7 +77,7 @@ class MemoryStore(Store):
         return next((item for item in experiment["runs"] if item["number"] == run), None) if experiment else None
 
     def get_loop(self, owner, loop_id):
-        loop = deepcopy(self._owned_loop(owner, loop_id))
+        loop = deepcopy(self._loops.get(loop_id) if owner is None else self._owned_loop(owner, loop_id))
         if loop:
             for experiment in loop["experiments"]:
                 for run in experiment["runs"]:
@@ -88,22 +88,31 @@ class MemoryStore(Store):
         def order(loop):
             return loop["created_at"], loop["loop_id"]
 
-        fields = ("loop_id", "name", "slug", "agent_id", "status", "outcome", "reason", "created_at", "updated_at")
+        fields = ("loop_id", "owner_account_id", "name", "slug", "agent_id", "status", "outcome", "reason", "created_at", "updated_at")
         loops = sorted(self._loops.values(), key=order, reverse=True)
         return [{field: loop[field] for field in fields} for loop in loops
-                if loop["owner_account_id"] == owner and (status is None or loop["status"] == status)
+                if (owner is None or loop["owner_account_id"] == owner) and (status is None or loop["status"] == status)
                 and (before is None or order(loop) < before)][:limit]
 
     def get_run(self, owner, loop_id, experiment, run):
-        parent = self._find_experiment(self._owned_loop(owner, loop_id), experiment)
+        loop = self._loops.get(loop_id) if owner is None else self._owned_loop(owner, loop_id)
+        parent = self._find_experiment(loop, experiment)
         saved = self._find_run(parent, run)
         return deepcopy(saved) | {"loop_id": loop_id, "experiment_number": experiment} if saved else None
 
-    def add_experiment(self, owner, loop_id, number, override, change, first_run):
+    def expire_waiting_loop(self, owner, loop_id, waiting_since, reason):
+        loop = self._running_loop(owner, loop_id)
+        if loop is None or loop["waiting_since"] != waiting_since:
+            return False
+        return self.transition(owner, loop_id, ("running",), "completed", "stopped_idle", reason)
+
+    def add_experiment(self, owner, loop_id, number, override, change, first_run, *, control_model=None):
         loop = self._running_loop(owner, loop_id)
         if loop is None or loop["waiting_since"] is None or number != loop["experiments"][-1]["number"] + 1:
             return False
         loop["experiments"].append(self._experiment(loop_id, number, override, change, first_run))
+        if control_model is not None:
+            loop["preflight"]["control_model"] = control_model
         loop.update(waiting_since=None, pending_change=None, updated_at=datetime.now(timezone.utc))
         return True
 
