@@ -1,4 +1,7 @@
-"""Synchronous Loop storage. Async routes call the store through asyncio.to_thread."""
+"""Synchronous Loop storage. Async routes call the store through asyncio.to_thread.
+
+An omitted owner scope (None) permits shared reads. Every write requires the Loop owner.
+"""
 
 from __future__ import annotations
 
@@ -47,12 +50,13 @@ class StartResult:
 class Store(Protocol):
     def find_start(self, owner: str, key: str, request_hash: str) -> StartResult | None: ...
     def start_loop(self, start: LoopStart, first_run: RunPlan) -> StartResult: ...
-    def get_loop(self, owner: str, loop_id: str) -> dict | None: ...
-    def list_loops(self, owner: str, *, status: str | None = None, limit: int = 50,
+    def get_loop(self, owner: str | None, loop_id: str) -> dict | None: ...
+    def list_loops(self, owner: str | None, *, status: str | None = None, limit: int = 50,
                    before: tuple[datetime, str] | None = None) -> list[dict]: ...
-    def get_run(self, owner: str, loop_id: str, experiment: int, run: int) -> dict | None: ...
+    def get_run(self, owner: str | None, loop_id: str, experiment: int, run: int) -> dict | None: ...
+    def expire_waiting_loop(self, owner: str, loop_id: str, waiting_since: datetime, reason: str) -> bool: ...
     def add_experiment(self, owner: str, loop_id: str, number: int, override: dict, change: str,
-                       first_run: RunPlan) -> bool: ...
+                       first_run: RunPlan, *, control_model: str | None = None) -> bool: ...
     def add_run(self, owner: str, loop_id: str, experiment: int, number: int, plan: RunPlan) -> bool: ...
     def record_experiment_id(self, owner: str, loop_id: str, experiment: int, kitaru_id: str) -> bool: ...
     def record_run_id(self, owner: str, loop_id: str, experiment: int, run: int, kitaru_id: str) -> bool: ...
@@ -162,15 +166,15 @@ class PostgresStore:
             _insert_run(connection, loop_id, 0, 1, first_run)
             return StartResult("created", loop_id)
 
-    def get_loop(self, owner: str, loop_id: str) -> dict | None:
+    def get_loop(self, owner: str | None, loop_id: str) -> dict | None:
         """Return ordered Experiment and Run summaries from a consistent snapshot."""
         with self._connect() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             loop = connection.execute("""
                 SELECT id AS loop_id, owner_account_id, name, slug, agent_id, status, outcome, reason,
                        config, preflight, pending_change, waiting_since, created_at, updated_at
-                FROM loops WHERE owner_account_id = %s AND id = %s
-            """, (owner, loop_id)).fetchone()
+                FROM loops WHERE (%s::text IS NULL OR owner_account_id = %s) AND id = %s
+            """, (owner, owner, loop_id)).fetchone()
             if loop is None:
                 return None
             experiments = list(connection.execute("""
@@ -189,31 +193,42 @@ class PostgresStore:
             loop["experiments"] = experiments
             return loop
 
-    def list_loops(self, owner: str, *, status: str | None = None, limit: int = 50,
+    def list_loops(self, owner: str | None, *, status: str | None = None, limit: int = 50,
                    before: tuple[datetime, str] | None = None) -> list[dict]:
         before_time, before_id = before if before is not None else (None, None)
         with self._connect() as connection:
             return list(connection.execute("""
-                SELECT id AS loop_id, name, slug, agent_id, status, outcome, reason, created_at, updated_at
+                SELECT id AS loop_id, owner_account_id, name, slug, agent_id, status, outcome, reason,
+                       created_at, updated_at
                 FROM loops
-                WHERE owner_account_id = %(owner)s
+                WHERE (%(owner)s::text IS NULL OR owner_account_id = %(owner)s)
                   AND (%(status)s::text IS NULL OR status = %(status)s)
                   AND (%(before_time)s::timestamptz IS NULL OR (created_at, id) < (%(before_time)s, %(before_id)s))
                 ORDER BY created_at DESC, id DESC
                 LIMIT %(limit)s
             """, {"owner": owner, "status": status, "limit": limit, "before_time": before_time, "before_id": before_id}))
 
-    def get_run(self, owner: str, loop_id: str, experiment: int, run: int) -> dict | None:
+    def get_run(self, owner: str | None, loop_id: str, experiment: int, run: int) -> dict | None:
         """Load a Run with its evidence, including before it has a Kitaru ID."""
         with self._connect() as connection:
             return connection.execute("""
                 SELECT runs.* FROM runs JOIN loops ON loops.id = runs.loop_id
-                WHERE loops.owner_account_id = %s AND runs.loop_id = %s
+                WHERE (%s::text IS NULL OR loops.owner_account_id = %s) AND runs.loop_id = %s
                   AND experiment_number = %s AND number = %s
-            """, (owner, loop_id, experiment, run)).fetchone()
+            """, (owner, owner, loop_id, experiment, run)).fetchone()
+
+    def expire_waiting_loop(self, owner: str, loop_id: str, waiting_since: datetime, reason: str) -> bool:
+        """Only expire the wait we observed. A concurrent proposal may have cleared it."""
+        status, outcome = loop_rules.END_STATES["stop_idle"]
+        with self._connect() as connection:
+            return connection.execute("""
+                UPDATE loops SET status = %s, outcome = %s, reason = %s,
+                                 waiting_since = NULL, pending_change = NULL, updated_at = now()
+                WHERE id = %s AND owner_account_id = %s AND status = 'running' AND waiting_since = %s
+            """, (status, outcome, reason, loop_id, owner, waiting_since)).rowcount == 1
 
     def add_experiment(self, owner: str, loop_id: str, number: int, override: dict, change: str,
-                       first_run: RunPlan) -> bool:
+                       first_run: RunPlan, *, control_model: str | None = None) -> bool:
         with self._connect() as connection:
             loop = _lock_running_loop(connection, owner, loop_id)
             if loop is None or loop["waiting_since"] is None:
@@ -226,9 +241,11 @@ class PostgresStore:
             _insert_experiment(connection, loop_id, number, override, change)
             _insert_run(connection, loop_id, number, 1, first_run)
             connection.execute("""
-                UPDATE loops SET waiting_since = NULL, pending_change = NULL, updated_at = now()
+                UPDATE loops SET waiting_since = NULL, pending_change = NULL, updated_at = now(),
+                    preflight = CASE WHEN %s::text IS NULL THEN preflight
+                        ELSE jsonb_set(preflight, '{control_model}', to_jsonb(%s::text)) END
                 WHERE id = %s
-            """, (loop_id,))
+            """, (control_model, control_model, loop_id))
             return True
 
     def add_run(self, owner: str, loop_id: str, experiment: int, number: int, plan: RunPlan) -> bool:

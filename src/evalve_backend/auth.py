@@ -7,8 +7,11 @@ passed through to Kitaru and is never stored or logged.
 
 import logging
 from dataclasses import dataclass
+from typing import Annotated
 
 import httpx
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 logger = logging.getLogger(__name__)
 
@@ -72,3 +75,26 @@ def _is_bearer(authorization: str | None) -> bool:
         return False
     scheme, _, credential = authorization.partition(" ")
     return scheme.lower() == "bearer" and bool(credential.strip())
+
+
+async def require_account(
+    request: Request,
+    bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(HTTPBearer(auto_error=False))],
+) -> Account:
+    """Resolve the caller through Kitaru, or refuse the request."""
+    return await verify_account(request, request.headers.get("authorization") if bearer else None)
+
+
+async def verify_account(request: Request, authorization: str | None) -> Account:
+    try:
+        return await current_account(request.app.state.kitaru, authorization)
+    except NotSignedIn:
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in to Kitaru and send its credential as a Bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    except KitaruUnavailable:
+        raise HTTPException(
+            status_code=503, detail="Kitaru could not confirm who is calling. Try again."
+        ) from None

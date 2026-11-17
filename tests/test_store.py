@@ -138,6 +138,20 @@ class StoreContract:
         self.assertEqual([item["loop_id"] for item in self.store.list_loops(outsider)], [other.loop_id])
         self.assertEqual([item["loop_id"] for item in self.store.list_loops(OWNER, status="running")], [loop_id])
         self.assertEqual(self.store.list_loops(OWNER, status="completed"), [])
+        self.assertEqual({item["loop_id"] for item in self.store.list_loops(None)}, {loop_id, other.loop_id})
+        self.assertEqual(self.store.get_loop(None, loop_id)["owner_account_id"], OWNER)
+        self.assertEqual(self.store.get_run(None, loop_id, 0, 1), self.store.get_run(OWNER, loop_id, 0, 1))
+
+    def test_idle_expiry_cannot_overwrite_a_committed_proposal(self):
+        loop_id = self.start()
+        self.collect_control(loop_id)
+        self.assertFalse(self.store.expire_waiting_loop("account-2", loop_id, COLLECTED, "Expired"))
+        self.assertTrue(self.store.add_experiment(OWNER, loop_id, 1, {"model": "new"}, "Try a model", PLAN,
+                                                  control_model="resolved-control"))
+        self.assertFalse(self.store.expire_waiting_loop(OWNER, loop_id, COLLECTED, "Expired"))
+        loop = self.store.get_loop(None, loop_id)
+        self.assertEqual(loop["status"], "running")
+        self.assertEqual(loop["preflight"]["control_model"], "resolved-control")
 
     def test_compare_and_set_honors_expected_status_and_terminal_pairs(self):
         loop_id = self.start()
