@@ -1,29 +1,31 @@
 """The five cases of evalve-ui/tests/test_evalve_loop.py, run against the pure Loop rules.
 
 The old tests ran the whole script against a fake Kitaru. These write down what happened
-(the `laps[].attempts[].result` state) and check the decision.
+(the `experiments[].runs[].result` state) and check the decision. Two of the five cases expect
+a different result than in `loop.py`, because of the rules decided in sc-327.
 """
 
 import ast
 import copy
 import json
 import unittest
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from evalve_backend import loop_rules
 
-BASELINE_MODEL = "baseline-model"
+CONTROL_MODEL = "control-model"
 
 
 def config(**limits) -> dict:
-    return {"required_consecutive_greens": 2, "max_attempts": 10, "budget_usd": "1.00"} | limits
+    return {"required_consecutive_greens": 2, "max_runs": 10, "budget_usd": "1.00"} | limits
 
 
 def new_state() -> dict:
     return {
-        "loop_id": "loop-1", "baseline_model": BASELINE_MODEL, "budget_stop": None,
-        "preflight": {"baseline_estimate_usd": "0.10"}, "laps": [],
+        "loop_id": "loop-1", "control_model": CONTROL_MODEL, "budget_stop": None,
+        "preflight": {"control_estimate_usd": "0.10"}, "experiments": [],
     }
 
 
@@ -31,47 +33,60 @@ def result(outcome: str, cost: str = "0.10", cost_incomplete: bool = False) -> d
     return {"outcome": outcome, "recorded_cost_usd": cost, "cost_incomplete": cost_incomplete}
 
 
-def add_attempt(state: dict, outcome: str | None, run_id: str | None = "run", **cost) -> dict:
-    """Add one attempt to the baseline lap. An outcome of None is a submission with no result yet."""
-    if not state["laps"]:
-        state["laps"].append({"number": 0, "override": {}, "change": "Unchanged baseline", "attempts": []})
-    attempts = state["laps"][-1]["attempts"]
-    attempt = {
-        "number": len(attempts) + 1, "run_id": run_id, "estimated_cost_usd": "0.10",
+def add_run(state: dict, outcome: str | None, run_id: str | None = "run", **cost) -> dict:
+    """Add one Run to the last Experiment (the Control Experiment when there is none).
+
+    An outcome of None is a submission with no result yet.
+    """
+    if not state["experiments"]:
+        state["experiments"].append({"number": 0, "override": {}, "change": "Unchanged control", "runs": []})
+    runs = state["experiments"][-1]["runs"]
+    run = {
+        "number": len(runs) + 1, "run_id": run_id, "estimated_cost_usd": "0.10",
         "result": result(outcome, **cost) if outcome else None,
     }
-    attempts.append(attempt)
-    return attempt
+    runs.append(run)
+    return run
+
+
+def add_experiment(state: dict, override: dict, *outcomes: str) -> dict:
+    """Start the next Experiment with a Run for each outcome."""
+    number = len(state["experiments"])
+    experiment = {"number": number, "override": override, "change": f"Change {number}", "runs": []}
+    state["experiments"].append(experiment)
+    for outcome in outcomes:
+        add_run(state, outcome)
+    return experiment
 
 
 class LoopRulesTest(unittest.TestCase):
     def next_action(self, cfg: dict, state: dict, outcome: str | None) -> dict:
-        add_attempt(state, outcome)
+        add_run(state, outcome)
         return loop_rules.decide(cfg, state)
 
-    def test_red_baseline_still_requires_two_fully_scored_runs(self):
+    def test_red_control_experiment_run_ends_it(self):
+        # In loop.py the control lap continued until it had two scored runs, even after a red one.
         cfg, state = config(), new_state()
-        self.assertEqual(loop_rules.decide(cfg, state)["action"], "start_baseline")
-        self.assertEqual(self.next_action(cfg, state, "red")["action"], "replay")
-        self.assertEqual(self.next_action(cfg, state, "incomplete")["action"], "retry")
-        self.assertEqual(self.next_action(cfg, state, "green")["action"], "start_candidate")
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "start_control")
+        step = self.next_action(cfg, state, "red")
+        self.assertEqual((step["action"], step["experiment"]), ("needs_change", 1))
 
-    def test_incomplete_baseline_breaks_the_green_streak(self):
+    def test_incomplete_run_does_not_break_the_green_streak(self):
+        # In loop.py an incomplete run started the streak again, so the second green was not enough.
         cfg, state = config(), new_state()
         self.assertEqual(self.next_action(cfg, state, "green")["action"], "replay")
         step = self.next_action(cfg, state, "incomplete")
-        self.assertEqual((step["action"], step["green_streak"]), ("retry", 0))
-        self.assertEqual(self.next_action(cfg, state, "green")["action"], "replay")
+        self.assertEqual((step["action"], step["green_streak"]), ("retry", 1))
         step = self.next_action(cfg, state, "green")
-        self.assertEqual((step["action"], step["lap"]), ("stop_success", 0))
+        self.assertEqual((step["action"], step["experiment"], step["green_streak"]), ("stop_success", 0, 2))
 
     def test_budget_blocks_next_submission_using_estimated_missing_cost(self):
         cfg, state = config(budget_usd="0.19"), new_state()
-        add_attempt(state, "incomplete", cost="0", cost_incomplete=True)
+        add_run(state, "incomplete", cost="0", cost_incomplete=True)
         step = loop_rules.decide(cfg, state)
         self.assertEqual((step["action"], step["accounted_cost_usd"]), ("retry", "0.10"))
 
-        estimate = loop_rules.estimate_attempt(state, {})
+        estimate = loop_rules.estimate_run(state, {})
         self.assertEqual(estimate, Decimal("0.10"))
         plan = loop_rules.plan_submission(cfg, state, step, estimate)
         self.assertIn("budget", plan["budget_stop"])
@@ -80,23 +95,25 @@ class LoopRulesTest(unittest.TestCase):
         state["budget_stop"] = plan["budget_stop"]
         for _ in range(2):
             self.assertEqual(loop_rules.decide(cfg, state)["action"], "stop_budget")
-        self.assertEqual(len(state["laps"][0]["attempts"]), 1)
+        self.assertEqual(len(state["experiments"][0]["runs"]), 1)
 
-    def test_attempt_cap_counts_incomplete_runs(self):
-        cfg, state = config(max_attempts=2), new_state()
-        self.assertEqual(self.next_action(cfg, state, "red")["action"], "replay")
+    def test_run_cap_counts_incomplete_runs(self):
+        # loop.py used a red first run here. A red run now ends the Experiment, so the cap is reached
+        # by an incomplete run instead.
+        cfg, state = config(max_runs=2), new_state()
+        self.assertEqual(self.next_action(cfg, state, "green")["action"], "replay")
         self.assertEqual(self.next_action(cfg, state, "incomplete")["action"], "stop_attempt_cap")
         self.assertEqual(loop_rules.decide(cfg, state)["action"], "stop_attempt_cap")
-        self.assertEqual(len(state["laps"][0]["attempts"]), 2)
+        self.assertEqual(len(state["experiments"][0]["runs"]), 2)
 
-    def test_interrupted_submission_resumes_with_the_same_attempt(self):
+    def test_interrupted_submission_resumes_with_the_same_run(self):
         cfg, state = config(), new_state()
-        attempt = add_attempt(state, None, run_id=None)
+        run = add_run(state, None, run_id=None)
         self.assertEqual(loop_rules.decide(cfg, state)["action"], "resume_start")
 
-        attempt["run_id"] = "run-1"
+        run["run_id"] = "run-1"
         step = loop_rules.decide(cfg, state)
-        self.assertEqual((step["action"], step["run_id"], step["attempts"]), ("collect", "run-1", 1))
+        self.assertEqual((step["action"], step["run_id"], step["runs"]), ("collect", "run-1", 1))
 
 
 COHORT_VERSION = "00000000-0000-4000-8000-000000000001"
@@ -107,7 +124,7 @@ def form(**changes) -> dict:
         "name": "Test loop", "server_url": "https://kitaru.example.test/", "cohort_version_id": COHORT_VERSION,
         "evaluators": [{"ref": "policy@1"}], "allowed_changes": ["system_prompt"],
         "tool_policy": {"default": {"type": "history", "scope": "baseline", "on_miss": "fail"}},
-        "required_consecutive_greens": 2, "max_attempts": 10, "budget_usd": "1.00",
+        "required_consecutive_greens": 2, "max_runs": 10, "budget_usd": "1.00",
     } | changes
 
 
@@ -204,7 +221,7 @@ class ValidateConfigTest(unittest.TestCase):
             "name": form(name="!!!"),
             "cohort": form(cohort_version_id="not-a-uuid"),
             "server": form(server_url="https://user:pass@kitaru"),
-            "streak above the cap": form(required_consecutive_greens=3, max_attempts=2),
+            "streak above the cap": form(required_consecutive_greens=3, max_runs=2),
             "streak is not an integer": form(required_consecutive_greens=True),
             "zero budget": form(budget_usd="0"),
             "negative budget": form(budget_usd="-1"),
@@ -218,7 +235,7 @@ class ValidateConfigTest(unittest.TestCase):
             "repeated evaluator": form(evaluators=[{"ref": "policy@1"}, {"ref": "policy@1"}]),
             "no tool policy default": form(tool_policy={}),
             "tool policy without a type": form(tool_policy={"default": {}}),
-            "blank baseline model": form(baseline_model=" "),
+            "blank control model": form(control_model=" "),
             "bad agent version": form(agent_version="agent"),
         }
         for label, bad in cases.items():
@@ -230,31 +247,31 @@ class ValidateConfigTest(unittest.TestCase):
 class ValidateCandidateTest(unittest.TestCase):
     def setUp(self):
         self.cfg = loop_rules.validate_config(form(allowed_changes=["system_prompt", "model"], allowed_models=["model-b", "model-c"]))
-        self.state = new_state() | {"baseline_prompt": "Be brief."}
-        add_attempt(self.state, "red")
+        self.state = new_state() | {"control_prompt": "Be brief."}
+        add_run(self.state, "red")
 
-    def refused(self, override, change="Try something", baseline_model=None, cfg=None):
+    def refused(self, override, change="Try something", control_model=None, cfg=None):
         with self.assertRaises(loop_rules.CandidateError):
-            loop_rules.validate_candidate(cfg or self.cfg, self.state, override, change, baseline_model)
+            loop_rules.validate_candidate(cfg or self.cfg, self.state, override, change, control_model)
 
     def test_a_new_prompt_is_accepted(self):
         plan = loop_rules.validate_candidate(self.cfg, self.state, {"system_prompt": "Be kind."}, " Kinder tone ", None)
-        self.assertEqual(plan, {"override": {"system_prompt": "Be kind."}, "change": "Kinder tone", "baseline_model": BASELINE_MODEL})
+        self.assertEqual(plan, {"override": {"system_prompt": "Be kind."}, "change": "Kinder tone", "control_model": CONTROL_MODEL})
 
     def test_a_new_allowed_model_is_accepted(self):
         plan = loop_rules.validate_candidate(self.cfg, self.state, {"model": "model-b"}, "Bigger model", None)
-        self.assertEqual((plan["override"], plan["baseline_model"]), ({"model": "model-b"}, BASELINE_MODEL))
+        self.assertEqual((plan["override"], plan["control_model"]), ({"model": "model-b"}, CONTROL_MODEL))
 
     def test_the_inherited_model_is_pinned_the_first_time_it_is_supplied(self):
-        self.state["baseline_model"] = None
+        self.state["control_model"] = None
         plan = loop_rules.validate_candidate(self.cfg, self.state, {"model": "model-b"}, "Bigger model", "model-a")
-        self.assertEqual(plan["baseline_model"], "model-a")
+        self.assertEqual(plan["control_model"], "model-a")
         self.refused({"model": "model-b"})
-        self.refused({"model": "model-b"}, baseline_model=" ")
+        self.refused({"model": "model-b"}, control_model=" ")
 
     def test_a_repeated_override_is_refused(self):
-        self.state["laps"].append({"number": 1, "override": {"model": "model-b"}, "change": "x", "attempts": []})
-        self.state["laps"].append({"number": 2, "override": {"system_prompt": "Be kind."}, "change": "y", "attempts": []})
+        self.state["experiments"].append({"number": 1, "override": {"model": "model-b"}, "change": "x", "runs": []})
+        self.state["experiments"].append({"number": 2, "override": {"system_prompt": "Be kind."}, "change": "y", "runs": []})
         self.refused({"model": "model-b"})
         self.refused({"system_prompt": "Be kind."})
         loop_rules.validate_candidate(self.cfg, self.state, {"model": "model-c"}, "Another model", None)
@@ -263,20 +280,20 @@ class ValidateCandidateTest(unittest.TestCase):
         self.refused({"model": "model-z"})
         self.refused({"model": "model-b"}, cfg=loop_rules.validate_config(form()))
 
-    def test_the_baseline_model_is_refused(self):
-        self.cfg["allowed_models"].append(BASELINE_MODEL)
-        self.refused({"model": BASELINE_MODEL})
+    def test_the_control_model_is_refused(self):
+        self.cfg["allowed_models"].append(CONTROL_MODEL)
+        self.refused({"model": CONTROL_MODEL})
 
-    def test_a_pinned_baseline_model_cannot_be_replaced(self):
-        self.refused({"model": "model-b"}, baseline_model="other-model")
+    def test_a_pinned_control_model_cannot_be_replaced(self):
+        self.refused({"model": "model-b"}, control_model="other-model")
 
-    def test_a_prompt_that_does_not_change_the_baseline_is_refused(self):
+    def test_a_prompt_that_does_not_change_the_control_prompt_is_refused(self):
         self.refused({"system_prompt": "Be brief."})
         self.refused({"system_prompt": "  "})
 
-    def test_prompt_changes_must_be_allowed_and_take_no_baseline_model(self):
+    def test_prompt_changes_must_be_allowed_and_take_no_control_model(self):
         self.refused({"system_prompt": "Be kind."}, cfg=loop_rules.validate_config(form(allowed_changes=["model"], allowed_models=["model-b"])))
-        self.refused({"system_prompt": "Be kind."}, baseline_model=BASELINE_MODEL)
+        self.refused({"system_prompt": "Be kind."}, control_model=CONTROL_MODEL)
 
     def test_a_change_summary_and_exactly_one_override_are_required(self):
         self.refused({"system_prompt": "Be kind."}, change=" ")
@@ -366,23 +383,26 @@ class ScoreRunTest(unittest.TestCase):
 
 
 class LoopFixture(unittest.TestCase):
-    """A Loop with a baseline lap of three attempts and an empty candidate lap."""
-
+    """A Loop in Experiment 1: a red Control Experiment, then a green Run and a Run that is not submitted yet."""
 
     def setUp(self):
         self.cfg = loop_rules.validate_config(form(allowed_changes=["system_prompt", "model"], allowed_models=["model-b"]))
         self.state = new_state() | {
             "requested_by": "account-1",
-            "preflight": {"baseline_estimate_usd": "0.10", "agent_version_id": "agent-version", "evaluators": ["policy@1"]},
+            "preflight": {"control_estimate_usd": "0.10", "agent_version_id": "agent-version", "evaluators": ["policy@1"]},
         }
-        self.state["laps"] = [
-            {"number": 0, "override": {}, "change": "Unchanged baseline", "experiment_id": "exp-0", "attempts": [
+        self.state["experiments"] = [
+            {"number": 0, "override": {}, "change": "Unchanged control", "experiment_id": "exp-0", "runs": [
                 {"number": 1, "run_id": "run-1", "estimated_cost_usd": "0.10", "result": result("red") | {"passed": 1, "failed": 1, "unscored": 0}},
-                {"number": 2, "run_id": "run-2", "estimated_cost_usd": "0.10", "result": result("green") | {"passed": 2, "failed": 0, "unscored": 0}},
-                {"number": 3, "run_id": None, "estimated_cost_usd": "0.10", "result": None},
             ]},
-            {"number": 1, "override": {"model": "model-b"}, "change": "Bigger model", "experiment_id": "exp-1", "attempts": []},
+            {"number": 1, "override": {"model": "model-b"}, "change": "Bigger model", "experiment_id": "exp-1", "runs": [
+                {"number": 1, "run_id": "run-2", "estimated_cost_usd": "0.10", "result": result("green") | {"passed": 2, "failed": 0, "unscored": 0}},
+                {"number": 2, "run_id": None, "estimated_cost_usd": "0.10", "result": None},
+            ]},
         ]
+
+    def drop_the_pending_run(self):
+        self.state["experiments"][1]["runs"].pop()
 
 
 class DescriptionTest(LoopFixture):
@@ -391,9 +411,9 @@ class DescriptionTest(LoopFixture):
         return json.loads(line[len(prefix):])
 
     def test_the_baseline_description_carries_the_loop_settings(self):
-        text = loop_rules.description(self.cfg, self.state, self.state["laps"][0])
+        text = loop_rules.description(self.cfg, self.state, self.state["experiments"][0])
         first, second = text.split("\n")
-        self.assertEqual(first, "Round 0: Unchanged baseline")
+        self.assertEqual(first, "Round 0: Unchanged control")
         self.assertTrue(second.startswith("Evalve loop: {"))
         settings = self.line(text, "Evalve loop: ")
         self.assertEqual((settings["schema_version"], settings["loop_id"], settings["requested_by"], settings["lap"]),
@@ -403,47 +423,48 @@ class DescriptionTest(LoopFixture):
         self.assertEqual((settings["required_consecutive_greens"], settings["max_attempts"], settings["budget_usd"]), (2, 10, "1.00"))
         self.assertEqual((settings["allowed_changes"], settings["allowed_models"]), (["system_prompt", "model"], ["model-b"]))
 
-    def test_a_later_round_names_only_the_loop_and_the_lap(self):
-        text = loop_rules.description(self.cfg, self.state, self.state["laps"][1])
+    def test_a_later_experiment_names_only_the_loop_and_the_lap(self):
+        text = loop_rules.description(self.cfg, self.state, self.state["experiments"][1])
         self.assertEqual(text.split("\n")[0], "Round 1: Bigger model")
         self.assertEqual(self.line(text, "Evalve loop: "), {"schema_version": 1, "loop_id": "loop-1", "requested_by": "account-1", "lap": 1})
 
     def test_the_change_and_hypothesis_stay_on_one_line(self):
-        self.state["laps"][1]["change"] = "Bigger model\nfor the hard cases"
+        self.state["experiments"][1]["change"] = "Bigger model\nfor the hard cases"
         self.cfg["hypothesis"] = "Larger models\nfollow the policy"
-        text = loop_rules.description(self.cfg, self.state, self.state["laps"][1])
+        text = loop_rules.description(self.cfg, self.state, self.state["experiments"][1])
         self.assertEqual(text.split("\n")[0], "Round 1: Bigger model for the hard cases Hypothesis: Larger models follow the policy")
         self.assertEqual(len(text.split("\n")), 2)
 
     def test_the_settings_line_is_compact_json_with_sorted_keys(self):
-        line = loop_rules.description(self.cfg, self.state, self.state["laps"][1]).split("\n")[1]
+        line = loop_rules.description(self.cfg, self.state, self.state["experiments"][1]).split("\n")[1]
         self.assertEqual(line, 'Evalve loop: {"lap":1,"loop_id":"loop-1","requested_by":"account-1","schema_version":1}')
 
-    def test_lap_summaries_count_each_lap(self):
-        baseline, candidate = loop_rules.lap_summaries(self.state)
-        self.assertEqual(baseline["runs"], [
-            {"run_id": "run-1", "outcome": "red", "passed": 1, "failed": 1, "unscored": 0},
-            {"run_id": "run-2", "outcome": "green", "passed": 2, "failed": 0, "unscored": 0},
-        ])
-        self.assertEqual((baseline["attempts"], baseline["green"], baseline["red"], baseline["incomplete"], baseline["green_streak"]), (3, 1, 1, 0, 0))
-        self.assertEqual((candidate["lap"], candidate["experiment_id"], candidate["change"], candidate["runs"], candidate["attempts"]),
-                         (1, "exp-1", "Bigger model", [], 0))
+    def test_experiment_summaries_count_each_experiment(self):
+        control, experiment_1 = loop_rules.experiment_summaries(self.state)
+        self.assertEqual(control["runs"], [{"run_id": "run-1", "outcome": "red", "passed": 1, "failed": 1, "unscored": 0}])
+        self.assertEqual((control["lap"], control["experiment_id"], control["change"]), (0, "exp-0", "Unchanged control"))
+        self.assertEqual((control["attempts"], control["green"], control["red"], control["incomplete"], control["green_streak"]), (1, 0, 1, 0, 0))
+        # The Run that is not submitted counts as an attempt and has no entry in `runs`.
+        self.assertEqual(experiment_1["runs"], [{"run_id": "run-2", "outcome": "green", "passed": 2, "failed": 0, "unscored": 0}])
+        self.assertEqual((experiment_1["lap"], experiment_1["experiment_id"], experiment_1["change"]), (1, "exp-1", "Bigger model"))
+        self.assertEqual((experiment_1["attempts"], experiment_1["green"], experiment_1["red"], experiment_1["green_streak"]), (2, 1, 0, 0))
 
     def test_a_loop_that_is_still_going_reports_running(self):
+        self.assertEqual(loop_rules.decide(self.cfg, self.state)["action"], "resume_start")
         meta = loop_rules.result_metadata(self.cfg, self.state)
         self.assertEqual((meta["status"], meta["winner_lap"], meta["reason"]), ("running", None, None))
-        self.assertEqual((meta["schema_version"], meta["loop_id"], meta["baseline_model"], meta["attempts"]), (1, "loop-1", BASELINE_MODEL, 3))
-        self.assertEqual(meta["laps"], loop_rules.lap_summaries(self.state))
+        self.assertEqual((meta["schema_version"], meta["loop_id"], meta["baseline_model"], meta["attempts"]), (1, "loop-1", CONTROL_MODEL, 3))
+        self.assertEqual(meta["laps"], loop_rules.experiment_summaries(self.state))
 
     def test_a_win_reports_the_winning_lap(self):
-        self.state["laps"][1]["attempts"] = [
+        self.state["experiments"][1]["runs"] = [
             {"number": n, "run_id": f"run-c{n}", "estimated_cost_usd": "0.10", "result": result("green")} for n in (1, 2)
         ]
         meta = loop_rules.result_metadata(self.cfg, self.state)
         self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_success", 1))
 
     def test_a_stop_reports_its_reason(self):
-        self.state["laps"][0]["attempts"][2] = {"number": 3, "run_id": "run-3", "estimated_cost_usd": "0.10", "result": result("red")}
+        self.drop_the_pending_run()
         self.state["budget_stop"] = "The next replay was estimated at $0.10 and would exceed the budget."
         meta = loop_rules.result_metadata(self.cfg, self.state)
         self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_budget", None))
@@ -454,11 +475,11 @@ class DashboardGoldenTest(LoopFixture):
     """The published lines must parse under the dashboard's rules. See parse_evalve_loop."""
 
     def published(self) -> str:
-        baseline = loop_rules.description(self.cfg, self.state, self.state["laps"][0])
+        baseline = loop_rules.description(self.cfg, self.state, self.state["experiments"][0])
         return baseline + "\n" + loop_rules.RESULT_PREFIX + loop_rules.compact(loop_rules.result_metadata(self.cfg, self.state))
 
     def test_the_baseline_description_parses_into_the_setup(self):
-        parsed = parse_evalve_loop(loop_rules.description(self.cfg, self.state, self.state["laps"][0]))
+        parsed = parse_evalve_loop(loop_rules.description(self.cfg, self.state, self.state["experiments"][0]))
         self.assertEqual(parsed["setup"], {
             "name": "Test loop", "cohort_version_id": COHORT_VERSION, "agent_version_id": "agent-version",
             "evaluators": ["policy@1"], "allowed_changes": ["system_prompt", "model"], "allowed_models": ["model-b"],
@@ -467,33 +488,44 @@ class DashboardGoldenTest(LoopFixture):
         self.assertEqual((parsed["required_greens"], parsed["result"], parsed["published_runs"]), (2, None, []))
 
     def test_only_the_baseline_line_is_the_loop_the_dashboard_reads(self):
-        self.assertIsNone(parse_evalve_loop(loop_rules.description(self.cfg, self.state, self.state["laps"][1])))
+        self.assertIsNone(parse_evalve_loop(loop_rules.description(self.cfg, self.state, self.state["experiments"][1])))
 
     def test_a_loop_that_is_still_going_parses_as_running(self):
         parsed = parse_evalve_loop(self.published())
         self.assertEqual((parsed["result"], parsed["published_runs"]), ({"status": "running"}, []))
 
     def test_a_win_parses_with_its_winning_lap_and_published_runs(self):
-        self.state["laps"][1]["attempts"] = [
+        self.state["experiments"][1]["runs"] = [
             {"number": n, "run_id": f"run-c{n}", "estimated_cost_usd": "0.10", "result": result("green")} for n in (1, 2)
         ]
         parsed = parse_evalve_loop(self.published())
         self.assertEqual(parsed["result"], {"status": "stop_success", "winner_lap": 1})
         self.assertEqual(parsed["published_runs"], [
-            {"experiment_id": "exp-0", "run_id": "run-1"}, {"experiment_id": "exp-0", "run_id": "run-2"},
+            {"experiment_id": "exp-0", "run_id": "run-1"},
             {"experiment_id": "exp-1", "run_id": "run-c1"}, {"experiment_id": "exp-1", "run_id": "run-c2"},
         ])
 
     def test_each_stop_parses_with_its_reason(self):
-        self.state["laps"][0]["attempts"][2] = {"number": 3, "run_id": "run-3", "estimated_cost_usd": "0.10", "result": result("red")}
+        self.drop_the_pending_run()
         self.state["budget_stop"] = "The next replay was estimated at $0.10 and would exceed the budget."
         parsed = parse_evalve_loop(self.published())
         self.assertEqual(parsed["result"], {"status": "stop_budget", "reason": self.state["budget_stop"]})
 
         self.state["budget_stop"] = None
-        self.cfg["max_attempts"] = 3
+        self.cfg["max_runs"] = 2
         parsed = parse_evalve_loop(self.published())
         self.assertEqual(parsed["result"], {"status": "stop_attempt_cap", "reason": "The total replay attempt cap was reached."})
+
+    def test_a_loop_that_stopped_as_idle_publishes_a_status_the_dashboard_does_not_read_yet(self):
+        # stop_idle is new in sc-327. parseEvalveLoop reads only running, stop_success, stop_attempt_cap
+        # and stop_budget, so until loops.ts changes the dashboard shows a Loop that went idle with no result.
+        self.state["experiments"] = self.state["experiments"][:1]
+        waiting_since = IdleLimitTest.WAITING_SINCE
+        meta = loop_rules.result_metadata(self.cfg, self.state, waiting_since + timedelta(hours=25), waiting_since)
+        self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_idle", None))
+        self.assertIn("24 hours", meta["reason"])
+        lines = loop_rules.description(self.cfg, self.state, self.state["experiments"][0]) + "\n" + loop_rules.RESULT_PREFIX + loop_rules.compact(meta)
+        self.assertIsNone(parse_evalve_loop(lines)["result"])
 
     def test_a_result_from_another_loop_is_ignored(self):
         lines = self.published().split("\n")
@@ -507,12 +539,120 @@ class DashboardGoldenTest(LoopFixture):
                 self.assertIsNone(parse_evalve_loop(text))
 
 
+class GreenStreakTest(unittest.TestCase):
+    def streak(self, *outcomes) -> int:
+        state = new_state()
+        for outcome in outcomes:
+            add_run(state, outcome)
+        return loop_rules.green_streak(state["experiments"][0]["runs"]) if outcomes else 0
+
+    def test_it_counts_green_runs_from_the_last_run_backward(self):
+        self.assertEqual(self.streak("red", "green", "green"), 2)
+        self.assertEqual(self.streak("green", "green", "green"), 3)
+
+    def test_it_skips_incomplete_runs(self):
+        self.assertEqual(self.streak("green", "incomplete", "green"), 2)
+        self.assertEqual(self.streak("incomplete", "incomplete"), 0)
+        self.assertEqual(self.streak("green", "incomplete"), 1)
+
+    def test_it_stops_at_a_red_run(self):
+        self.assertEqual(self.streak("green", "red", "green"), 1)
+        self.assertEqual(self.streak("green", "green", "red"), 0)
+
+    def test_a_run_with_no_result_stops_the_count(self):
+        self.assertEqual(self.streak("green", None), 0)
+
+
+class NeedsChangeTest(unittest.TestCase):
+    def test_a_red_run_ends_a_candidate_experiment_too(self):
+        cfg, state = config(), new_state()
+        add_run(state, "red")
+        add_experiment(state, {"model": "model-b"}, "green", "red")
+        step = loop_rules.decide(cfg, state)
+        self.assertEqual((step["action"], step["experiment"]), ("needs_change", 2))
+
+    def test_an_incomplete_run_is_retried_and_a_green_run_is_replayed(self):
+        cfg, state = config(), new_state()
+        add_experiment(state, {}, "green")
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "replay")
+        add_run(state, "incomplete")
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "retry")
+
+    def test_an_experiment_with_no_run_yet_gets_its_first_run(self):
+        cfg, state = config(), new_state()
+        add_run(state, "red")
+        add_experiment(state, {"model": "model-b"})
+        step = loop_rules.decide(cfg, state)
+        self.assertEqual((step["action"], step["experiment"], step["green_streak"], step["runs"]), ("replay", 1, 0, 1))
+
+    def test_a_control_experiment_with_no_run_yet_is_started(self):
+        cfg, state = config(), new_state()
+        add_experiment(state, {})
+        step = loop_rules.decide(cfg, state)
+        self.assertEqual((step["action"], step["experiment"]), ("start_control", 0))
+
+    def test_the_run_cap_is_checked_before_a_change_is_asked_for(self):
+        cfg, state = config(max_runs=1), new_state()
+        add_run(state, "red")
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "stop_attempt_cap")
+
+    def test_the_budget_is_checked_before_a_change_is_asked_for(self):
+        cfg, state = config(budget_usd="0.10"), new_state()
+        add_run(state, "red")
+        self.assertEqual(loop_rules.decide(cfg, state)["action"], "stop_budget")
+
+
+class IdleLimitTest(unittest.TestCase):
+    WAITING_SINCE = datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc)
+
+    def decide(self, state, hours=None, cfg=None):
+        now = None if hours is None else self.WAITING_SINCE + timedelta(hours=hours)
+        return loop_rules.decide(cfg or config(), state, now, self.WAITING_SINCE if hours is not None else None)
+
+    def setUp(self):
+        self.state = new_state()
+        add_run(self.state, "red")
+
+    def test_more_than_24_hours_in_needs_change_stops_the_loop(self):
+        step = self.decide(self.state, hours=24.5)
+        self.assertEqual(step["action"], "stop_idle")
+        self.assertIn("24 hours", step["reason"])
+        self.assertEqual(loop_rules.end_state(step["action"]), {"status": "completed", "outcome": "stopped_idle"})
+
+    def test_a_loop_whose_change_arrived_is_not_idle(self):
+        add_experiment(self.state, {"model": "model-b"})
+        step = self.decide(self.state, hours=100)
+        self.assertEqual((step["action"], step["experiment"]), ("replay", 1))
+
+    def test_24_hours_or_less_still_needs_a_change(self):
+        self.assertEqual(self.decide(self.state, hours=24)["action"], "needs_change")
+        self.assertEqual(self.decide(self.state, hours=1)["action"], "needs_change")
+
+    def test_the_idle_limit_is_not_checked_without_both_times(self):
+        self.assertEqual(self.decide(self.state)["action"], "needs_change")
+        self.assertEqual(loop_rules.decide(config(), self.state, self.WAITING_SINCE + timedelta(days=9))["action"], "needs_change")
+
+    def test_a_loop_that_is_not_waiting_for_a_change_never_goes_idle(self):
+        state = new_state()
+        add_run(state, None)
+        self.assertEqual(self.decide(state, hours=100)["action"], "collect")
+        state = new_state()
+        add_run(state, "green")
+        self.assertEqual(self.decide(state, hours=100)["action"], "replay")
+
+    def test_a_pass_comes_before_the_idle_limit(self):
+        state = new_state()
+        add_run(state, "green")
+        add_run(state, "green")
+        self.assertEqual(self.decide(state, hours=100)["action"], "stop_success")
+
+
 class EndStateTest(LoopFixture):
     def test_each_stop_has_a_status_and_an_outcome(self):
         expected = {
-            "stop_success": ("completed", "target_reached"),
             "stop_attempt_cap": ("completed", "max_runs"),
             "stop_budget": ("completed", "budget_reached"),
+            "stop_idle": ("completed", "stopped_idle"),
             "cancelled": ("cancelled", "stopped_by_user"),
             "error": ("failed", "error"),
         }
@@ -520,28 +660,54 @@ class EndStateTest(LoopFixture):
             with self.subTest(stop):
                 self.assertEqual(loop_rules.end_state(stop), {"status": status, "outcome": outcome})
 
+    def test_a_pass_of_the_control_experiment_is_already_passing(self):
+        self.assertEqual(loop_rules.end_state("stop_success", 0), {"status": "completed", "outcome": "already_passing"})
+
+    def test_a_pass_of_any_other_experiment_is_passed(self):
+        for experiment in (1, 2, 7):
+            with self.subTest(experiment):
+                self.assertEqual(loop_rules.end_state("stop_success", experiment), {"status": "completed", "outcome": "passed"})
+
+    def test_a_pass_needs_the_experiment_that_passed(self):
+        with self.assertRaises(ValueError):
+            loop_rules.end_state("stop_success")
+
+    def test_the_end_state_of_a_loop_that_decide_stopped(self):
+        control = new_state()
+        add_run(control, "green")
+        add_run(control, "green")
+        step = loop_rules.decide(config(), control)
+        self.assertEqual(loop_rules.end_state(step["action"], step["experiment"])["outcome"], "already_passing")
+
+        candidate = new_state()
+        add_run(candidate, "red")
+        add_experiment(candidate, {"model": "model-b"}, "green", "green")
+        step = loop_rules.decide(config(), candidate)
+        self.assertEqual((step["action"], step["experiment"]), ("stop_success", 1))
+        self.assertEqual(loop_rules.end_state(step["action"], step["experiment"])["outcome"], "passed")
+
     def test_every_stop_that_decide_returns_has_an_end_state(self):
-        self.state["laps"][1]["attempts"] = [
-            {"number": n, "run_id": f"run-c{n}", "estimated_cost_usd": "0.10", "result": result("green")} for n in (1, 2)
-        ]
-        self.state["laps"][0]["attempts"].pop()
-        stops = {"stop_success": loop_rules.decide(self.cfg, self.state)["action"]}
+        reached = {}
+        state = new_state()
+        add_run(state, "green")
+        add_run(state, "green")
+        reached["stop_success"] = loop_rules.decide(config(), state)
 
-        self.state["laps"][1]["attempts"] = []
-        self.state["budget_stop"] = "The next replay was estimated at $0.10 and would exceed the budget."
-        stops["stop_budget"] = loop_rules.decide(self.cfg, self.state)["action"]
+        state = new_state()
+        add_run(state, "red")
+        reached["stop_idle"] = loop_rules.decide(
+            config(), state, IdleLimitTest.WAITING_SINCE + timedelta(hours=25), IdleLimitTest.WAITING_SINCE)
 
-        self.state["budget_stop"] = None
-        self.cfg["max_attempts"] = 2
-        stops["stop_attempt_cap"] = loop_rules.decide(self.cfg, self.state)["action"]
+        reached["stop_budget"] = loop_rules.decide(config(budget_usd="0.10"), state)
+        reached["stop_attempt_cap"] = loop_rules.decide(config(max_runs=1), state)
 
-        for expected, action in stops.items():
+        for expected, step in reached.items():
             with self.subTest(expected):
-                self.assertEqual(action, expected)
-                self.assertIn(action, loop_rules.END_STATES)
+                self.assertEqual(step["action"], expected)
+                loop_rules.end_state(step["action"], step.get("experiment"))
 
     def test_an_action_that_is_not_a_stop_has_no_end_state(self):
-        for action in ("start_baseline", "replay", "retry", "start_candidate", "collect", "resume_start", "running"):
+        for action in ("start_control", "replay", "retry", "needs_change", "collect", "resume_start", "running"):
             with self.subTest(action):
                 with self.assertRaises(ValueError):
                     loop_rules.end_state(action)
@@ -549,10 +715,17 @@ class EndStateTest(LoopFixture):
 
 class PureModuleTest(unittest.TestCase):
     # Parsing and arithmetic only: nothing here reaches the network, a database or the file system.
-    ALLOWED_IMPORTS = {"__future__", "copy", "decimal", "json", "re", "urllib.parse", "uuid"}
+    ALLOWED_IMPORTS = {"__future__", "copy", "datetime", "decimal", "json", "re", "urllib.parse", "uuid"}
+    TREE = ast.parse(Path(loop_rules.__file__).read_text(encoding="utf-8"))
+
+    def test_the_module_reads_no_clock(self):
+        # `datetime` is imported for the types and for the idle limit. The caller gives the current time.
+        clock = {"now", "utcnow", "today", "fromtimestamp"}
+        calls = {node.attr for node in ast.walk(self.TREE) if isinstance(node, ast.Attribute)}
+        self.assertEqual(calls & clock, set())
 
     def test_the_module_imports_nothing_that_does_io(self):
-        tree = ast.parse(Path(loop_rules.__file__).read_text(encoding="utf-8"))
+        tree = self.TREE
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
