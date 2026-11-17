@@ -60,6 +60,10 @@ class ExperimentExecutor(Protocol):
         """Return the id of the Experiment, creating it when the store has none."""
         ...
 
+    async def adopt(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str | None:
+        """Return the id of a run that this Run's submit already started, if there is one."""
+        ...
+
     async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str:
         """Return the id of the run: an adopted one, or a new one."""
         ...
@@ -139,8 +143,7 @@ class KitaruExecutor:
         if not same:
             raise ExecutionFailed(f"The Kitaru experiment {spec.name} no longer matches the Loop's settings.")
 
-    async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str:
-        # Always look first: the submit may have gone through after its key expired.
+    async def adopt(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str | None:
         earliest = run.submit_started_at - ADOPTION_WINDOW
         candidates = [
             item for item in await self._api.list_runs(experiment_id)
@@ -148,8 +151,15 @@ class KitaruExecutor:
             and item["cohort_version_id"] == run.cohort_version_id and item["agent_version_id"] == run.agent_version_id
             and datetime.fromisoformat(item["created"]) >= earliest
         ]
-        if candidates:
-            return min(candidates, key=lambda item: (datetime.fromisoformat(item["created"]), item["id"]))["id"]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: (datetime.fromisoformat(item["created"]), item["id"]))["id"]
+
+    async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str:
+        # Always look first: the submit may have gone through after its key expired.
+        adopted = await self.adopt(experiment_id, run, known_run_ids)
+        if adopted is not None:
+            return adopted
         body = {"cohort_version_id": run.cohort_version_id, "agent_version_id": run.agent_version_id,
                 "evaluate_baselines": False, "baseline_evaluation_mode": "none"}
         started = await self._api.start_run(experiment_id, body, run.idempotency_key)

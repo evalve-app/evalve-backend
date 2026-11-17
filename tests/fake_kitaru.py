@@ -29,8 +29,10 @@ MEMBERS = ("recorded-1", "recorded-2")
 
 
 class FakeKitaru:
-    def __init__(self, authorization: str):
+    def __init__(self, authorization: str, account: dict | None = None):
         self.authorization = authorization
+        # Sign-in answers for each accepted Authorization header. Every account can use every resource.
+        self.accounts = {authorization: account or {"id": "account-1", "name": "jack", "active": True}}
         self.requests: list[httpx.Request] = []
         self._failures: list[tuple[str, str, httpx.Response]] = []
         self._lost_replies: list[tuple[str, str]] = []
@@ -57,7 +59,8 @@ class FakeKitaru:
         self.replays: dict[str, dict] = {}
         self.evaluations: dict[str, dict] = {}
         self.keys: dict[str, tuple[str, httpx.Response]] = {}
-        self.now = datetime(2026, 11, 17, 9, 0, tzinfo=timezone.utc)
+        # Kitaru's clock and the backend's agree, as on one deployment.
+        self.now = datetime.now(timezone.utc)
         self._ids = count(1)
 
     def fail(self, method: str, path_pattern: str, status: int, detail: str = "Failed on purpose.") -> None:
@@ -132,11 +135,17 @@ class FakeKitaru:
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        return self.handle(request)
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        if request.headers.get("authorization") != self.authorization:
+        account = self.accounts.get(request.headers.get("authorization"))
+        if account is None:
             return httpx.Response(401, json={"detail": "Not authenticated."})
         path = request.url.path
+        if path == "/api/v1/accounts/me":
+            return httpx.Response(200, json=account)
         for failure in self._failures:
             method, pattern, response = failure
             if method == request.method and re.fullmatch(pattern, path):
@@ -157,14 +166,14 @@ class FakeKitaru:
         if key is not None and 200 <= response.status_code < 300:
             self.keys[key] = (fingerprint, response)
         for lost in self._lost_replies:
-            if lost == (request.method, path):
+            if lost[0] == request.method and re.fullmatch(lost[1], path):
                 self._lost_replies.remove(lost)
                 raise httpx.ReadError("The reply was lost.", request=request)
         return response
 
-    def lose_next_reply(self, method: str, path: str) -> None:
+    def lose_next_reply(self, method: str, path_pattern: str) -> None:
         """Do the next matching request, then drop its reply, as a network cut would."""
-        self._lost_replies.append((method, path))
+        self._lost_replies.append((method, path_pattern))
 
     def _route(self, request: httpx.Request, path: str) -> httpx.Response:
         for method, pattern, handler in self._routes():

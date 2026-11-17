@@ -153,6 +153,26 @@ class StoreContract:
         self.assertEqual(loop["status"], "running")
         self.assertEqual(loop["preflight"]["control_model"], "resolved-control")
 
+    def test_a_loop_lock_is_held_by_one_caller_at_a_time(self):
+        loop_id = self.start()
+        held = self.store.lock_loop(loop_id)
+        self.assertIsNotNone(held)
+        self.assertIsNone(self.store.lock_loop(loop_id))
+        other = self.store.lock_loop("another-loop")
+        self.assertIsNotNone(other)
+        other.release()
+        held.release()
+        again = self.store.lock_loop(loop_id)
+        self.assertIsNotNone(again)
+        again.release()
+
+    def test_racing_lock_attempts_let_one_through(self):
+        loop_id = self.start()
+        locks = race(*[lambda: self.store.lock_loop(loop_id)] * 4)
+        taken = [lock for lock in locks if lock is not None]
+        self.assertEqual(len(taken), 1)
+        taken[0].release()
+
     def test_compare_and_set_honors_expected_status_and_terminal_pairs(self):
         loop_id = self.start()
         for status, outcome in (("completed", "not-an-outcome"), ("completed", "error"), ("failed", None)):

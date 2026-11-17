@@ -1,6 +1,7 @@
 """In-memory Store for API and Loop-step tests."""
 
 import json
+import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -8,12 +9,27 @@ from uuid import uuid4
 from evalve_backend.store import LoopStart, RunPlan, StartResult, Store, dump_store_json, validate_transition
 
 
+class _MemoryLock:
+    def __init__(self, lock: threading.Lock):
+        self._lock = lock
+
+    def release(self) -> None:
+        self._lock.release()
+
+
 class MemoryStore(Store):
-    """Single-threaded test double with the same state shape and write guards."""
+    """Test double with the same state shape and write guards. Writes happen one at a time."""
 
     def __init__(self):
         self._loops: dict[str, dict] = {}
         self._starts: dict[tuple[str, str], tuple[str, str]] = {}
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def lock_loop(self, loop_id):
+        with self._locks_guard:
+            lock = self._locks.setdefault(loop_id, threading.Lock())
+        return _MemoryLock(lock) if lock.acquire(blocking=False) else None
 
     def find_start(self, owner, key, request_hash):
         existing = self._starts.get((owner, key))

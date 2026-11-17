@@ -13,6 +13,7 @@ from evalve_backend.auth import Account, require_account
 from evalve_backend.loops_api import router as loops_router
 from evalve_backend.loop_steps import LoopSteps
 from evalve_backend.settings import Settings
+from evalve_backend.steps import KitaruLoopSteps
 from evalve_backend.store import PostgresStore, Store
 
 PREFIX = "/evalve"
@@ -34,6 +35,9 @@ def create_app(
             trust_env=False, transport=kitaru_transport,
         ) as kitaru:
             app.state.kitaru = kitaru
+            if loop_steps is None:
+                # The Loop steps call the same Kitaru server with each caller's own key.
+                app.state.loop_steps = KitaruLoopSteps(kitaru, app.state.loop_store, settings.kitaru_url)
             yield
 
     app = FastAPI(
