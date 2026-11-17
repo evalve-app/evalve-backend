@@ -29,3 +29,15 @@ jobs:
         env:
           EVALVE_TEST_DB_HOST: localhost
       - run: docker build -t evalve-backend .
+
+  evalve-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ./evalve-mcp
+      # The tests also check the tools against openapi/evalve-backend.json,
+      # and that the three version values in the repo are the same.
+      - run: python -B -m unittest discover -s evalve-mcp/tests
