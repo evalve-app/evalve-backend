@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import httpx
 
-from evalve_backend.executor import ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec
+from evalve_backend.executor import AmbiguousRun, ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec
 from evalve_backend.kitaru_api import KitaruApi, KitaruTransient
 from fake_kitaru import AGENT_ID, AGENT_VERSION_ID, COHORT_VERSION_ID, EVALUATOR_VERSION_ID, FakeKitaru
 from helpers import KITARU_URL, TOKEN
@@ -150,8 +150,15 @@ class SubmitTest(ExecutorTest):
         await super().asyncSetUp()
         self.experiment_id = await self.experiment()
 
+    async def submit(self, spec: RunSpec, known: set[str] = frozenset()) -> str:
+        return await self.executor.submit(self.experiment_id, spec, set(known), self.kitaru.now)
+
+    def keys_expire(self) -> None:
+        self.kitaru.tick(16 * 60)
+        self.kitaru.expire_keys()
+
     async def test_a_run_is_started_with_its_key(self):
-        run_id = await self.executor.submit(self.experiment_id, self.run_spec(), set())
+        run_id = await self.submit(self.run_spec())
         self.assertEqual(self.kitaru.runs[run_id]["agent_version_id"], AGENT_VERSION_ID)
         (request,) = self.kitaru.requests_to("POST", rf"{EXPERIMENTS}/[^/]+/runs")
         self.assertEqual(request.headers["idempotency-key"], "evalve-loop-1-exp-0-run-1")
@@ -159,20 +166,31 @@ class SubmitTest(ExecutorTest):
             b'{"agent_version_id":"agent-version-2","baseline_evaluation_mode":"none",'
             b'"cohort_version_id":"6f1c2c4e-8f4b-4a57-9a51-3c0e2a1d5b10","evaluate_baselines":false}'))
 
-    async def test_a_lost_submit_reply_is_adopted_by_the_next_call(self):
+    async def test_a_lost_submit_reply_is_recovered_with_the_same_key(self):
         spec = self.run_spec()
         self.kitaru.lose_next_reply("POST", f"{EXPERIMENTS}/{self.experiment_id}/runs")
         with self.assertRaises(KitaruTransient):
-            await self.executor.submit(self.experiment_id, spec, set())
-        run_id = await self.executor.submit(self.experiment_id, spec, set())
+            await self.submit(spec)
+        run_id = await self.submit(spec)
         self.assertEqual(list(self.kitaru.runs), [run_id])
-        self.assertEqual(len(self.kitaru.requests_to("POST", rf"{EXPERIMENTS}/[^/]+/runs")), 1)
+        one, two = self.kitaru.requests_to("POST", rf"{EXPERIMENTS}/[^/]+/runs")
+        self.assertEqual(one.content, two.content)
+
+    async def test_a_run_someone_started_just_before_is_not_taken_while_the_key_is_held(self):
+        spec = self.run_spec()
+        theirs = self.kitaru.add_run(self.experiment_id, created=spec.submit_started_at - timedelta(seconds=30))["id"]
+        self.kitaru.lose_next_reply("POST", f"{EXPERIMENTS}/{self.experiment_id}/runs")
+        with self.assertRaises(KitaruTransient):
+            await self.submit(spec)
+        ours = await self.submit(spec)
+        self.assertNotEqual(ours, theirs)
+        self.assertEqual(len(self.kitaru.runs), 2)
 
     async def test_a_retry_inside_the_key_window_sends_the_same_bytes_and_gets_the_same_run(self):
         spec = self.run_spec()
-        first = await self.executor.submit(self.experiment_id, spec, set())
-        # The list shows the run as known, so the executor submits again. The key replays the answer.
-        self.assertEqual(await self.executor.submit(self.experiment_id, spec, {first}), first)
+        first = await self.submit(spec)
+        # The run is known, so nothing is adopted. The key replays the answer.
+        self.assertEqual(await self.submit(spec, {first}), first)
         one, two = self.kitaru.requests_to("POST", rf"{EXPERIMENTS}/[^/]+/runs")
         self.assertEqual(one.content, two.content)
         self.assertEqual(len(self.kitaru.runs), 1)
@@ -181,17 +199,19 @@ class SubmitTest(ExecutorTest):
         spec = self.run_spec()
         self.kitaru.lose_next_reply("POST", f"{EXPERIMENTS}/{self.experiment_id}/runs")
         with self.assertRaises(KitaruTransient):
-            await self.executor.submit(self.experiment_id, spec, set())
-        self.kitaru.tick(16 * 60)
-        self.kitaru.expire_keys()
-        run_id = await self.executor.submit(self.experiment_id, spec, set())
+            await self.submit(spec)
+        self.keys_expire()
+        run_id = await self.submit(spec)
         self.assertEqual(list(self.kitaru.runs), [run_id])
+        self.assertEqual(len(self.kitaru.requests_to("POST", rf"{EXPERIMENTS}/[^/]+/runs")), 1)
 
-    async def test_the_oldest_of_two_candidates_is_adopted(self):
+    async def test_after_the_key_expired_two_runs_that_fit_stop_the_loop(self):
         spec = self.run_spec()
-        older = self.kitaru.add_run(self.experiment_id)["id"]
         self.kitaru.add_run(self.experiment_id)
-        self.assertEqual(await self.executor.submit(self.experiment_id, spec, set()), older)
+        self.kitaru.add_run(self.experiment_id)
+        self.keys_expire()
+        with self.assertRaises(AmbiguousRun):
+            await self.submit(spec)
         self.assertEqual(self.kitaru.requests_to("POST", rf"{EXPERIMENTS}/[^/]+/runs"), [])
 
     async def test_runs_that_do_not_qualify_are_ignored_and_a_new_run_starts(self):
@@ -200,21 +220,23 @@ class SubmitTest(ExecutorTest):
         self.kitaru.add_run(self.experiment_id, agent_version_id="agent-version-1")
         self.kitaru.add_run(self.experiment_id, cohort_version_id="other-cohort-version")
         self.kitaru.add_run(self.experiment_id, created=spec.submit_started_at - timedelta(seconds=61))
-        run_id = await self.executor.submit(self.experiment_id, spec, {known})
+        self.keys_expire()
+        run_id = await self.submit(spec, {known})
         self.assertEqual(len(self.kitaru.runs), 5)
         self.assertEqual(self.kitaru.runs[run_id]["number"], 5)
 
     async def test_a_run_up_to_60_seconds_before_the_submit_started_is_adopted(self):
         spec = self.run_spec()
         early = self.kitaru.add_run(self.experiment_id, created=spec.submit_started_at - timedelta(seconds=60))["id"]
-        self.assertEqual(await self.executor.submit(self.experiment_id, spec, set()), early)
+        self.keys_expire()
+        self.assertEqual(await self.submit(spec), early)
 
 
 class RunTest(ExecutorTest):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.experiment_id = await self.experiment()
-        self.run_id = await self.executor.submit(self.experiment_id, self.run_spec(), set())
+        self.run_id = await self.executor.submit(self.experiment_id, self.run_spec(), set(), self.kitaru.now)
 
     async def test_poll_reads_the_run(self):
         self.assertEqual((await self.executor.poll(self.run_id))["status"], "running")
@@ -233,6 +255,8 @@ class RunTest(ExecutorTest):
         self.assertEqual([e["passed"] for e in evidence.evaluations], [False, True])
         self.assertEqual(set(evidence.sessions), {r["result_session_id"] for r in evidence.replays})
         self.assertEqual({s["cost"] for s in evidence.sessions.values()}, {"0.04"})
+        # A session list leaves the reply out unless it is asked for.
+        self.assertEqual(sorted(s["outputs"] for s in evidence.sessions.values()), ["reply 0", "reply 1"])
 
     async def test_cancel_stops_a_running_run(self):
         await self.executor.cancel(self.run_id)

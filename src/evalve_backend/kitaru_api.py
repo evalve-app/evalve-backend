@@ -106,10 +106,10 @@ class KitaruApi:
     async def _get(self, path: str, params: dict | None = None) -> dict:
         return await self._send("GET", path, params=params)
 
-    async def _list(self, path: str, filter: dict | None = None) -> list[dict]:
+    async def _list(self, path: str, filter: dict | None = None, **extra) -> list[dict]:
         items, cursor = [], None
         while True:
-            params = {"size": PAGE_SIZE}
+            params = {"size": PAGE_SIZE, **extra}
             if filter is not None:
                 params["filter"] = json.dumps(filter, sort_keys=True, separators=(",", ":"))
             if cursor:
@@ -186,5 +186,6 @@ class KitaruApi:
         return await self._list("/api/v1/evaluations", condition("experiment_run_id", run_id))
 
     async def list_result_sessions(self, run_id: str) -> list[dict]:
-        """One paged call for every result session of the run, with `cost`. Baseline sessions stay out."""
-        return await self._list("/api/v1/sessions", condition("experiment_run_id", run_id))
+        """One paged call for every result session of the run, with `cost`. Baseline sessions stay out.
+        A session list leaves out `inputs` and `outputs` unless asked, and `outputs` is the reply."""
+        return await self._list("/api/v1/sessions", condition("experiment_run_id", run_id), include_payloads="true")

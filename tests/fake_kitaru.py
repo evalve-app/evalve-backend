@@ -189,7 +189,7 @@ class FakeKitaru:
             ("GET", r"/api/v1/agents/([^/]+)", lambda r, i: self._one(self.agents, i)),
             ("GET", r"/api/v1/agents/([^/]+)/versions", self._agent_versions),
             ("GET", r"/api/v1/agent-versions/([^/]+)", lambda r, i: self._one(self.agent_versions, i)),
-            ("GET", r"/api/v1/sessions", lambda r: self._page(r, self.sessions.values(), self._session_field)),
+            ("GET", r"/api/v1/sessions", self._sessions),
             ("GET", r"/api/v1/evaluators", lambda r: self._page(r, self.evaluators.values())),
             ("GET", r"/api/v1/evaluators/([^/]+)/versions/(\d+)",
              lambda r, i, v: self._one(self.evaluator_versions, (i, int(v)))),
@@ -259,17 +259,20 @@ class FakeKitaru:
             return session["cohort_version_ids"]
         return session.get(field)
 
-    def _page(self, request: httpx.Request, items, field=None) -> httpx.Response:
+    def _sessions(self, request: httpx.Request) -> httpx.Response:
+        # As in Kitaru, a session list has no inputs or outputs unless include_payloads is set.
+        payloads = request.url.params.get("include_payloads") == "true"
+        return self._page(request, self.sessions.values(), self._session_field, ({} if payloads else {"inputs", "outputs"}))
+
+    def _page(self, request: httpx.Request, items, field=None, leave_out=frozenset()) -> httpx.Response:
         field = field or (lambda item, name: item.get(name))
         raw = request.url.params.get("filter")
         matching = [item for item in items if raw is None or _matches(json.loads(raw), item, field)]
         size = int(request.url.params.get("size", 20))
         start = int(request.url.params.get("cursor") or 0)
         end = start + size
-        return httpx.Response(200, json={
-            "items": [_public(item) for item in matching[start:end]],
-            "next_cursor": str(end) if end < len(matching) else None,
-        })
+        page = [{key: value for key, value in _public(item).items() if key not in leave_out} for item in matching[start:end]]
+        return httpx.Response(200, json={"items": page, "next_cursor": str(end) if end < len(matching) else None})
 
 
 def _matches(condition: dict, item: dict, field) -> bool:

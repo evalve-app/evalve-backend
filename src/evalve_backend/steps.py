@@ -17,7 +17,7 @@ import httpx
 
 from evalve_backend import loop_rules
 from evalve_backend.auth import Account
-from evalve_backend.executor import ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec
+from evalve_backend.executor import AmbiguousRun, ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec
 from evalve_backend.kitaru_api import KitaruApi, KitaruNotFound, KitaruRejected, KitaruTransient
 from evalve_backend.loop_steps import PreparedStart, StepUnavailable
 from evalve_backend.preflight import preflight, run_spec_hash
@@ -140,8 +140,14 @@ class _Step:
         if run is not None and run["result"] is None:
             run_id = run["run_id"]
             if run_id is None and experiment["experiment_id"] is not None:
-                # The submit may have started a run whose reply was lost.
-                run_id = await self.executor.adopt(experiment["experiment_id"], self.run_spec(experiment, run), self.known_run_ids())
+                # The submit may have started a run whose reply was lost. While the key is held, finding
+                # it can start it, and the cancel below stops it.
+                try:
+                    run_id = await self.executor.find_run(experiment["experiment_id"], self.run_spec(experiment, run),
+                                                          self.known_run_ids(), self.now)
+                except AmbiguousRun:
+                    # Never cancel a run that may be someone else's.
+                    run_id = None
                 if run_id is not None:
                     await to_thread(self.store.record_run_id, self.owner, self.loop_id, experiment["number"],
                                     run["number"], run_id)
@@ -172,7 +178,7 @@ class _Step:
         await self.check_run_spec()
         experiment_id = await self.executor.ensure_experiment(self.experiment_spec(experiment))
         await to_thread(self.store.record_experiment_id, self.owner, self.loop_id, number, experiment_id)
-        run_id = await self.executor.submit(experiment_id, self.run_spec(experiment, run), self.known_run_ids())
+        run_id = await self.executor.submit(experiment_id, self.run_spec(experiment, run), self.known_run_ids(), self.now)
         await to_thread(self.store.record_run_id, self.owner, self.loop_id, number, run["number"], run_id)
 
     async def fits_budget(self, estimate) -> bool:

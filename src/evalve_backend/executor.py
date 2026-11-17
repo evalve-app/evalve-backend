@@ -1,9 +1,10 @@
 """Where the Runs of a Loop execute. KitaruExecutor uses the Kitaru workers; Fargate can replace it (sc-283).
 
-The store is the record of which experiment and runs belong to a Loop (sc-315). Kitaru idempotency
-keys expire after 900 s and a run has no field for a marker, so the executor finds its own work
-again by the stored names, ids and times, never by the run `number`. Scoring stays in
-`loop_rules.score_run`.
+The store is the record of which experiment and runs belong to a Loop (sc-315). While Kitaru still
+holds a submit's idempotency key, sending the same request again returns exactly the run it started.
+Keys expire after 900 s and a run has no field for a marker, so after that the executor finds its own
+work again by the stored names, ids and times, never by the run `number`, and it stops rather than
+guess between two runs. Scoring stays in `loop_rules.score_run`.
 """
 
 from __future__ import annotations
@@ -17,10 +18,17 @@ from evalve_backend.kitaru_api import KitaruApi, KitaruConflict, KitaruNotFound,
 
 # A run created this long before its Run row's submit started can still be the one it submitted.
 ADOPTION_WINDOW = timedelta(seconds=60)
+# Kitaru keeps a key for 900 s from when it receives the request, which is after the submit started.
+# The margin covers a slow request and a small clock difference.
+KEY_TRUSTED_FOR = timedelta(seconds=900 - 120)
 
 
 class ExecutionFailed(Exception):
     """The Loop cannot go on. The message is the plain reason the Loop is failed with."""
+
+
+class AmbiguousRun(ExecutionFailed):
+    """More than one Kitaru run could be the one this Run's submit started."""
 
 
 class RunGone(Exception):
@@ -60,12 +68,12 @@ class ExperimentExecutor(Protocol):
         """Return the id of the Experiment, creating it when the store has none."""
         ...
 
-    async def adopt(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str | None:
-        """Return the id of a run that this Run's submit already started, if there is one."""
+    async def find_run(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str | None:
+        """Return the id of the run that this Run's submit started, if there is one."""
         ...
 
-    async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str:
-        """Return the id of the run: an adopted one, or a new one."""
+    async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str:
+        """Return the id of the run: the one already started, or a new one."""
         ...
 
     async def poll(self, run_id: str) -> dict: ...
@@ -154,23 +162,35 @@ class KitaruExecutor:
         if not same:
             raise ExecutionFailed(f"The Kitaru experiment {spec.name} no longer matches the Loop's settings.")
 
+    async def find_run(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str | None:
+        if now - run.submit_started_at < KEY_TRUSTED_FOR:
+            # The same request with the same key returns the run Kitaru started for it. If the first
+            # request never arrived, this starts the run now.
+            return await self._start(experiment_id, run)
+        return await self.adopt(experiment_id, run, known_run_ids)
+
     async def adopt(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str | None:
+        """After the key expired: the one run that fits the submit. Someone else can start a run on
+        the experiment, so two that fit stop the Loop."""
         earliest = run.submit_started_at - ADOPTION_WINDOW
         candidates = [
-            item for item in await self._api.list_runs(experiment_id)
+            item["id"] for item in await self._api.list_runs(experiment_id)
             if item["id"] not in known_run_ids
             and item["cohort_version_id"] == run.cohort_version_id and item["agent_version_id"] == run.agent_version_id
             and datetime.fromisoformat(item["created"]) >= earliest
         ]
-        if not candidates:
-            return None
-        return min(candidates, key=lambda item: (datetime.fromisoformat(item["created"]), item["id"]))["id"]
+        if len(candidates) > 1:
+            raise AmbiguousRun("Kitaru has more than one run that could be this Run's, so the backend cannot tell which is its own.")
+        return candidates[0] if candidates else None
 
-    async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str]) -> str:
-        # Always look first: the submit may have gone through after its key expired.
-        adopted = await self.adopt(experiment_id, run, known_run_ids)
-        if adopted is not None:
-            return adopted
+    async def submit(self, experiment_id: str, run: RunSpec, known_run_ids: set[str], now: datetime) -> str:
+        # Always look first: the submit may have gone through before a restart.
+        found = await self.find_run(experiment_id, run, known_run_ids, now)
+        if found is not None:
+            return found
+        return await self._start(experiment_id, run)
+
+    async def _start(self, experiment_id: str, run: RunSpec) -> str:
         body = {"cohort_version_id": run.cohort_version_id, "agent_version_id": run.agent_version_id,
                 "evaluate_baselines": False, "baseline_evaluation_mode": "none"}
         started = await self._api.start_run(experiment_id, body, run.idempotency_key)

@@ -11,8 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 
-import httpx
-
 from evalve_backend import loop_rules
 from fake_kitaru import AGENT_VERSION_ID, COHORT_VERSION_ID, FakeKitaru
 from helpers import TOKEN, client
@@ -101,6 +99,8 @@ class PassingTest(StepsTest):
         detail = self.status(loop_id)
         self.assertEqual((detail["next"]["action"], detail["next"]["experiment"]), ("needs_change", 1))
         self.assertEqual([case["case"] for case in detail["needs"]["failed_cases"]], ["Case 1"])
+        # The agent reads what it answered before it proposes a change.
+        self.assertEqual([case["reply"] for case in detail["needs"]["failed_cases"]], ["reply 0"])
         self.assertIsNotNone(self.stored(loop_id)["waiting_since"])
         self.assertEqual(len(self.kitaru.runs), 1)
         self.assertEqual(self.published(loop_id)["status"], "running")
@@ -136,23 +136,49 @@ class RestartSafetyTest(StepsTest):
     def test_a_lost_submit_reply_is_retried_with_the_same_key(self):
         self.kitaru.lose_next_reply("POST", RUNS)
         self.assertEqual(self.start().status_code, 503)
-        # The run list misses the run, so the backend submits again inside the key window.
-        self.kitaru.answer_once("GET", r"/api/v1/experiment-runs", httpx.Response(200, json={"items": [], "next_cursor": None}))
+        # Inside the key window the backend sends the same request again, and Kitaru answers with the run.
         reply = self.start()
         self.assertEqual(reply.status_code, 200, reply.text)
         first, second = self.kitaru.requests_to("POST", RUNS)
         self.assertEqual((first.headers["idempotency-key"], first.content), (second.headers["idempotency-key"], second.content))
         self.assertEqual(len(self.kitaru.runs), 1)
 
+    def submit_started_16_minutes_ago(self):
+        (loop,) = self.store._loops.values()
+        loop["experiments"][-1]["runs"][-1]["submit_started_at"] -= timedelta(minutes=16)
+        self.kitaru.expire_keys()
+
     def test_a_call_after_the_key_expired_adopts_the_run_and_starts_no_second_run(self):
         self.kitaru.lose_next_reply("POST", RUNS)
         self.assertEqual(self.start().status_code, 503)
-        self.kitaru.expire_keys()
+        self.submit_started_16_minutes_ago()
         reply = self.start()
         self.assertEqual(reply.status_code, 200, reply.text)
         self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
         (run_id,) = self.kitaru.runs
         self.assertEqual(self.stored(reply.json()["loop_id"])["experiments"][0]["runs"][0]["run_id"], run_id)
+
+    def test_after_the_key_expired_two_runs_that_fit_fail_the_loop_instead_of_guessing(self):
+        self.kitaru.lose_next_reply("POST", RUNS)
+        self.assertEqual(self.start().status_code, 503)
+        (ours,) = self.kitaru.runs
+        self.kitaru.add_run(self.kitaru.runs[ours]["experiment_id"])
+        self.submit_started_16_minutes_ago()
+        reply = self.start()
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(self.end(reply.json()["loop_id"]), ("failed", "error"))
+        self.assertIn("cannot tell which is its own", self.stored(reply.json()["loop_id"])["reason"])
+        self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
+
+    def test_a_cancel_after_the_key_expired_never_cancels_a_run_it_cannot_tell_apart(self):
+        self.kitaru.lose_next_reply("POST", RUNS)
+        self.assertEqual(self.start().status_code, 503)
+        (ours,) = self.kitaru.runs
+        theirs = self.kitaru.add_run(self.kitaru.runs[ours]["experiment_id"])["id"]
+        self.submit_started_16_minutes_ago()
+        (loop_id,) = self.store._loops
+        self.assertEqual(self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=OWNER).json()["status"], "cancelled")
+        self.assertEqual(self.kitaru.runs[theirs]["status"], "running")
 
     def test_a_run_that_the_backend_did_not_start_is_ignored(self):
         loop_id = self.started()
