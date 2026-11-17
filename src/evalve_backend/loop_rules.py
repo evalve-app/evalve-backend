@@ -7,14 +7,22 @@ Ported from evalve-ui/public/skills/evalve-loop/0.1.0/scripts/loop.py. The state
 from __future__ import annotations
 
 import copy
+import json
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
+SETTINGS_PREFIX = "Evalve loop: "
+RESULT_PREFIX = "Evalve result: "
+
 
 class ConfigError(ValueError):
     """The Loop settings are not usable. The message says what to fix."""
+
+
+def compact(value) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def dollars(value) -> Decimal:
@@ -291,3 +299,55 @@ def plan_submission(cfg: dict, state: dict, step: dict, estimate: Decimal) -> di
     if dollars(step["accounted_cost_usd"]) + estimate > dollars(cfg["budget_usd"]):
         return {"budget_stop": f"The next replay was estimated at ${estimate} and would exceed the budget."}
     return {"estimate": estimate}
+
+
+def description(cfg: dict, state: dict, lap: dict) -> str:
+    """The experiment description for one lap. The dashboard reads the `Evalve loop:` line."""
+    number = lap["number"]
+    change = " ".join(lap["change"].splitlines())
+    if cfg.get("hypothesis"):
+        change += " Hypothesis: " + " ".join(cfg["hypothesis"].splitlines())
+    lines = [f"Round {number}: {change}"]
+    settings = {"schema_version": 1, "loop_id": state["loop_id"], "requested_by": state["requested_by"], "lap": number}
+    if number == 0:
+        settings.update({key: cfg[key] for key in (
+            "name", "cohort_version_id", "required_consecutive_greens", "max_attempts",
+            "budget_usd", "allowed_changes", "allowed_models",
+        )})
+        settings["agent_version_id"] = state["preflight"]["agent_version_id"]
+        settings["evaluators"] = state["preflight"]["evaluators"]
+    lines.append(SETTINGS_PREFIX + compact(settings))
+    return "\n".join(lines)
+
+
+def lap_summaries(state: dict) -> list[dict]:
+    result = []
+    for lap in state["laps"]:
+        attempts = lap["attempts"]
+        outcomes = [(a["result"] or {}).get("outcome") for a in attempts]
+        runs = []
+        for attempt in attempts:
+            if attempt["run_id"]:
+                scored = attempt["result"] or {}
+                runs.append({"run_id": attempt["run_id"], **{
+                    key: scored.get(key) for key in ("outcome", "passed", "failed", "unscored")
+                }})
+        result.append({
+            "lap": lap["number"], "experiment_id": lap["experiment_id"], "change": lap["change"],
+            "runs": runs, "attempts": len(attempts),
+            "green": outcomes.count("green"), "red": outcomes.count("red"), "incomplete": outcomes.count("incomplete"),
+            "green_streak": green_streak(attempts),
+        })
+    return result
+
+
+def result_metadata(cfg: dict, state: dict) -> dict:
+    """The body of the `Evalve result:` line. Its words are the ones the dashboard reads."""
+    step = decide(cfg, state)
+    return {
+        "schema_version": 1, "loop_id": state["loop_id"], "status": step["action"] if step["action"].startswith("stop_") else "running",
+        "winner_lap": step.get("lap") if step["action"] == "stop_success" else None,
+        "baseline_model": state["baseline_model"],
+        "attempts": step["attempts"], "recorded_cost_usd": step["recorded_cost_usd"],
+        "accounted_cost_usd": step["accounted_cost_usd"], "reason": step.get("reason"), "laps": lap_summaries(state),
+    }

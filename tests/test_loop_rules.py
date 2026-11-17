@@ -5,6 +5,7 @@ The old tests ran the whole script against a fake Kitaru. These write down what 
 """
 
 import copy
+import json
 import unittest
 from decimal import Decimal
 
@@ -289,6 +290,86 @@ class ScoreRunTest(unittest.TestCase):
         self.sessions["result-2"]["cost"] = None
         scored = self.score()
         self.assertEqual((scored["outcome"], scored["recorded_cost_usd"], scored["cost_incomplete"]), ("green", "0.10", True))
+
+
+class DescriptionTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = loop_rules.validate_config(form(allowed_changes=["system_prompt", "model"], allowed_models=["model-b"]))
+        self.state = new_state() | {
+            "requested_by": "account-1",
+            "preflight": {"baseline_estimate_usd": "0.10", "agent_version_id": "agent-version", "evaluators": ["policy@1"]},
+        }
+        self.state["laps"] = [
+            {"number": 0, "override": {}, "change": "Unchanged baseline", "experiment_id": "exp-0", "attempts": [
+                {"number": 1, "run_id": "run-1", "estimated_cost_usd": "0.10", "result": result("red") | {"passed": 1, "failed": 1, "unscored": 0}},
+                {"number": 2, "run_id": "run-2", "estimated_cost_usd": "0.10", "result": result("green") | {"passed": 2, "failed": 0, "unscored": 0}},
+                {"number": 3, "run_id": None, "estimated_cost_usd": "0.10", "result": None},
+            ]},
+            {"number": 1, "override": {"model": "model-b"}, "change": "Bigger model", "experiment_id": "exp-1", "attempts": []},
+        ]
+
+    def line(self, text, prefix):
+        (line,) = [line for line in text.split("\n") if line.startswith(prefix)]
+        return json.loads(line[len(prefix):])
+
+    def test_the_baseline_description_carries_the_loop_settings(self):
+        text = loop_rules.description(self.cfg, self.state, self.state["laps"][0])
+        first, second = text.split("\n")
+        self.assertEqual(first, "Round 0: Unchanged baseline")
+        self.assertTrue(second.startswith("Evalve loop: {"))
+        settings = self.line(text, "Evalve loop: ")
+        self.assertEqual((settings["schema_version"], settings["loop_id"], settings["requested_by"], settings["lap"]),
+                         (1, "loop-1", "account-1", 0))
+        self.assertEqual(settings["name"], "Test loop")
+        self.assertEqual((settings["agent_version_id"], settings["evaluators"]), ("agent-version", ["policy@1"]))
+        self.assertEqual((settings["required_consecutive_greens"], settings["max_attempts"], settings["budget_usd"]), (2, 10, "1.00"))
+        self.assertEqual((settings["allowed_changes"], settings["allowed_models"]), (["system_prompt", "model"], ["model-b"]))
+
+    def test_a_later_round_names_only_the_loop_and_the_lap(self):
+        text = loop_rules.description(self.cfg, self.state, self.state["laps"][1])
+        self.assertEqual(text.split("\n")[0], "Round 1: Bigger model")
+        self.assertEqual(self.line(text, "Evalve loop: "), {"schema_version": 1, "loop_id": "loop-1", "requested_by": "account-1", "lap": 1})
+
+    def test_the_change_and_hypothesis_stay_on_one_line(self):
+        self.state["laps"][1]["change"] = "Bigger model\nfor the hard cases"
+        self.cfg["hypothesis"] = "Larger models\nfollow the policy"
+        text = loop_rules.description(self.cfg, self.state, self.state["laps"][1])
+        self.assertEqual(text.split("\n")[0], "Round 1: Bigger model for the hard cases Hypothesis: Larger models follow the policy")
+        self.assertEqual(len(text.split("\n")), 2)
+
+    def test_the_settings_line_is_compact_json_with_sorted_keys(self):
+        line = loop_rules.description(self.cfg, self.state, self.state["laps"][1]).split("\n")[1]
+        self.assertEqual(line, 'Evalve loop: {"lap":1,"loop_id":"loop-1","requested_by":"account-1","schema_version":1}')
+
+    def test_lap_summaries_count_each_lap(self):
+        baseline, candidate = loop_rules.lap_summaries(self.state)
+        self.assertEqual(baseline["runs"], [
+            {"run_id": "run-1", "outcome": "red", "passed": 1, "failed": 1, "unscored": 0},
+            {"run_id": "run-2", "outcome": "green", "passed": 2, "failed": 0, "unscored": 0},
+        ])
+        self.assertEqual((baseline["attempts"], baseline["green"], baseline["red"], baseline["incomplete"], baseline["green_streak"]), (3, 1, 1, 0, 0))
+        self.assertEqual((candidate["lap"], candidate["experiment_id"], candidate["change"], candidate["runs"], candidate["attempts"]),
+                         (1, "exp-1", "Bigger model", [], 0))
+
+    def test_a_loop_that_is_still_going_reports_running(self):
+        meta = loop_rules.result_metadata(self.cfg, self.state)
+        self.assertEqual((meta["status"], meta["winner_lap"], meta["reason"]), ("running", None, None))
+        self.assertEqual((meta["schema_version"], meta["loop_id"], meta["baseline_model"], meta["attempts"]), (1, "loop-1", BASELINE_MODEL, 3))
+        self.assertEqual(meta["laps"], loop_rules.lap_summaries(self.state))
+
+    def test_a_win_reports_the_winning_lap(self):
+        self.state["laps"][1]["attempts"] = [
+            {"number": n, "run_id": f"run-c{n}", "estimated_cost_usd": "0.10", "result": result("green")} for n in (1, 2)
+        ]
+        meta = loop_rules.result_metadata(self.cfg, self.state)
+        self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_success", 1))
+
+    def test_a_stop_reports_its_reason(self):
+        self.state["laps"][0]["attempts"][2] = {"number": 3, "run_id": "run-3", "estimated_cost_usd": "0.10", "result": result("red")}
+        self.state["budget_stop"] = "The next replay was estimated at $0.10 and would exceed the budget."
+        meta = loop_rules.result_metadata(self.cfg, self.state)
+        self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_budget", None))
+        self.assertIn("exceed the budget", meta["reason"])
 
 
 if __name__ == "__main__":
