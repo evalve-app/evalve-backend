@@ -13,7 +13,7 @@ Every route sits under `/evalve`, so one hostname can serve Kitaru and Evalve.
 | `GET /evalve/health` | None | `200` with `"database": "ok"` when the backend can query its database. `503` when it can't. Both include `version` and `image`, so a deployment can confirm which build is serving. |
 | `GET /evalve/v1/me` | Kitaru credential | `200 {"id": "...", "name": "..."}` for the Kitaru account behind the credential. |
 
-The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. Only the account that started a Loop can propose, cancel, or advance it. A status read by another account returns stored results.
+The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the account that started a Loop can propose, cancel, or advance it. A status read by another account returns stored results.
 
 Starting, submitting, polling, and cancelling in Kitaru use the Loop steps service from sc-268. Until that service is wired in, requests that need it return `503`; saved Loops are still readable.
 

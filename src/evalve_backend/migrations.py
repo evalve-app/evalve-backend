@@ -75,6 +75,9 @@ MIGRATIONS = (
             )
         );
     """),
+    (2, """
+        CREATE INDEX loops_created ON loops (created_at DESC, id DESC);
+    """),
 )
 
 

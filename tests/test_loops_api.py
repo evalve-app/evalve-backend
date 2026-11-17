@@ -303,6 +303,19 @@ class LoopApiTest(unittest.TestCase):
             self.assertEqual(reply.status_code, 503)
         self.assertEqual(self.store.list_loops(None), [])
 
+    def test_owner_filter_keeps_newest_first_pagination(self):
+        oldest = self.make_loop()
+        teammate = self.start(START | {"name": "Teammate's Loop"}, headers=TEAM_AUTH)
+        newest = self.start(START | {"name": "Newest Loop"}, key="newest")
+        self.assertEqual([teammate.status_code, newest.status_code], [201, 201])
+
+        filters = {"owner_account_id": ACCOUNT["id"], "limit": 1}
+        page = self.api.get(LOOPS, headers=TEAM_AUTH, params=filters).json()
+        self.assertEqual([row["loop_id"] for row in page["items"]], [newest.json()["loop_id"]])
+        second = self.api.get(LOOPS, headers=TEAM_AUTH, params=filters | {"cursor": page["next_cursor"]}).json()
+        self.assertEqual([row["loop_id"] for row in second["items"]], [oldest])
+        self.assertIsNone(second["next_cursor"])
+
 
 class OpenApiTest(unittest.TestCase):
     def test_checked_in_spec_matches_the_app_and_declares_the_loop_enums(self):
@@ -313,3 +326,13 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(set(models["LoopDetail"]["properties"]["status"]["enum"]), {"running", "completed", "failed", "cancelled"})
         self.assertIn("passed", models["LoopDetail"]["properties"]["outcome"]["anyOf"][0]["enum"])
         self.assertIn("needs_change", models["LoopNext"]["properties"]["action"]["enum"])
+
+    def test_all_loop_operations_document_the_plain_validation_error(self):
+        paths = create_app(settings()).openapi()["paths"]
+        for path, operations in paths.items():
+            if path != LOOPS and not path.startswith(f"{LOOPS}/"):
+                continue
+            for method, operation in operations.items():
+                with self.subTest(path=path, method=method):
+                    schema = operation["responses"]["422"]["content"]["application/json"]["schema"]
+                    self.assertEqual(schema, {"$ref": "#/components/schemas/ApiError"})

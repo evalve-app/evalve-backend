@@ -48,7 +48,7 @@ def errors(*statuses: int) -> dict:
 
 
 router = APIRouter(
-    prefix="/v1/loops", tags=["Loops"], route_class=LoopRoute, responses=errors(401, 503),
+    prefix="/v1/loops", tags=["Loops"], route_class=LoopRoute, responses=errors(401, 422, 503),
 )
 
 
@@ -225,7 +225,7 @@ async def _submit_first(
 
 @router.post(
     "", status_code=201, response_model=models.LoopDetail,
-    responses={200: {"model": models.LoopDetail, "description": "Start request replayed"}, **errors(409, 422)},
+    responses={200: {"model": models.LoopDetail, "description": "Start request replayed"}, **errors(409)},
 )
 async def start_loop(
     body: models.StartLoop, response: Response, caller: SignedIn, store: LoopStore, steps: Steps,
@@ -260,14 +260,15 @@ async def start_loop(
     return await _detail(store, loop)
 
 
-@router.get("", response_model=models.LoopList, responses=errors(422))
+@router.get("", response_model=models.LoopList)
 async def list_loops(
     caller: SignedIn, store: LoopStore, status: models.LoopStatus | None = None,
+    owner_account_id: Annotated[str | None, Query(min_length=1, description="Filter by the Loop owner's Kitaru account ID.")] = None,
     cursor: Annotated[str | None, Query(max_length=512)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ):
     """List Loops across the deployment, newest first."""
-    rows = await to_thread(store.list_loops, None, status=status, limit=limit + 1, before=_before(cursor))
+    rows = await to_thread(store.list_loops, owner_account_id, status=status, limit=limit + 1, before=_before(cursor))
     return {"items": rows[:limit], "next_cursor": _cursor(rows[limit - 1]) if len(rows) > limit else None}
 
 
@@ -287,7 +288,7 @@ async def loop_status(loop_id: str, caller: SignedIn, store: LoopStore, steps: S
 
 
 @router.get(
-    "/{loop_id}/experiments/{experiment}/runs/{run}", response_model=models.RunDetail, responses=errors(404, 422),
+    "/{loop_id}/experiments/{experiment}/runs/{run}", response_model=models.RunDetail, responses=errors(404),
 )
 async def run_evidence(loop_id: str, experiment: ExperimentNumber, run: RunNumber, caller: SignedIn, store: LoopStore):
     """Read the evidence collected for one Run."""
@@ -324,7 +325,7 @@ def _existing_experiment(loop: dict, number: int, override: dict) -> dict | None
 
 
 @router.post(
-    "/{loop_id}/experiments", status_code=201, response_model=models.ExperimentAccepted, responses=errors(404, 409, 422),
+    "/{loop_id}/experiments", status_code=201, response_model=models.ExperimentAccepted, responses=errors(404, 409),
 )
 async def propose_experiment(
     loop_id: str, body: models.ProposeExperiment, caller: SignedIn, store: LoopStore, steps: Steps,

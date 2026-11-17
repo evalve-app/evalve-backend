@@ -276,22 +276,43 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
         self.assertEqual(waiting["waiting_since"], COLLECTED)
         self.assertEqual([exp["number"] for exp in waiting["experiments"]], [0])
 
-    def test_first_migration_serializes_and_preserves_pilot_table(self):
+    def test_migrations_serialize_and_preserve_pilot_table(self):
         self.drop_database()
         database.ensure_database(self.settings)
         with self.connect() as connection:
             connection.execute("CREATE TABLE evalve_loops (slug text PRIMARY KEY)")
             connection.execute("INSERT INTO evalve_loops VALUES ('pilot')")
         results = race(lambda: migrations.migrate(self.settings), lambda: migrations.migrate(self.settings))
-        self.assertCountEqual(results, [(1,), ()])
+        self.assertCountEqual(results, [(1, 2), ()])
         with self.connect() as connection:
-            self.assertEqual(connection.execute("SELECT version FROM schema_migrations").fetchall(), [(1,)])
+            versions = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            self.assertEqual(versions, [(1,), (2,)])
             self.assertEqual(connection.execute("SELECT slug FROM evalve_loops").fetchone(), ("pilot",))
+
+    def test_upgrade_indexes_existing_loops_across_owners(self):
+        self.drop_database()
+        database.ensure_database(self.settings)
+        with patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS[:1]):
+            self.assertEqual(migrations.migrate(self.settings), (1,))
+        loop_id = self.start()
+        other = self.store.start_loop(
+            replace(START, owner_account_id="account-2", slug="other"), PLAN,
+        )
+        self.assertEqual(migrations.migrate(self.settings), (2,))
+        self.assertEqual(migrations.migrate(self.settings), ())
+        with self.connect() as connection:
+            index, = connection.execute("SELECT pg_get_indexdef('loops_created'::regclass)").fetchone()
+            self.assertIn("USING btree (created_at DESC, id DESC)", index)
+        first, = self.store.list_loops(None, limit=1)
+        self.assertEqual(first["loop_id"], other.loop_id)
+        second, = self.store.list_loops(None, limit=1, before=(first["created_at"], first["loop_id"]))
+        self.assertEqual(second["loop_id"], loop_id)
 
     def test_migration_failure_rolls_back_schema_and_stops_startup(self):
         self.drop_database()
         with patch("evalve_backend.__main__.Settings.from_environment", return_value=self.settings):
-            broken = migrations.MIGRATIONS + ((2, "CREATE TABLE broken"),)
+            next_version = migrations.MIGRATIONS[-1][0] + 1
+            broken = migrations.MIGRATIONS + ((next_version, "CREATE TABLE broken"),)
             with (patch.object(migrations, "MIGRATIONS", broken),
                   patch("evalve_backend.__main__.uvicorn.run") as serve,
                   patch("sys.stderr")):
