@@ -17,6 +17,79 @@ The [Loop API contract](openapi/evalve-backend.json) covers start, list, status,
 
 A Loop moves forward only when its owner calls: a start, a status call, a change, or a cancel. Each call takes the Loop's lock, does at most one step in Kitaru with the caller's own key, and returns. The backend has no Kitaru key and no background task, and it never stores or logs the caller's key. When Kitaru can't answer, the call returns `503` and the next call tries again. When another call holds the Loop's lock, a status call returns the stored state.
 
+## Evalve MCP
+
+`evalve-mcp` is a second package in this repository, in [`evalve-mcp/`](evalve-mcp). It is a local MCP server through which a Teammate's coding agent runs Loops. The coding agent starts it as a subprocess on the Teammate's machine. It calls this backend over HTTPS with the Teammate's own Kitaru key. It has no Loop rules, it does not import the backend code, and it never runs on AWS.
+
+### Install
+
+Run these steps in the agent repository.
+
+1. Read the backend version. The route needs no credential.
+
+   ```bash
+   curl https://<host>/evalve/health
+   ```
+
+2. Add the package from the Git tag of that `version`. The tag and the `uv.lock` of the agent repository pin the version. The package is not on PyPI.
+
+   ```bash
+   uv add "evalve-mcp @ git+https://github.com/evalve-app/evalve-backend@v<version>#subdirectory=evalve-mcp"
+   ```
+
+3. Write the Claude Code config.
+
+   ```bash
+   uv run evalve-mcp setup --server https://<host>/evalve
+   ```
+
+   The command writes this entry in the `.mcp.json` of the current directory. It creates the file when the file is missing, and it changes only the `evalve` entry. When the file is not valid JSON, the command stops and changes nothing.
+
+   ```json
+   {
+     "mcpServers": {
+       "evalve": {
+         "command": "uv",
+         "args": ["run", "evalve-mcp", "--server", "https://<host>/evalve"]
+       }
+     }
+   }
+   ```
+
+   The entry holds no key, so the file is safe to commit.
+
+4. Set `KITARU_API_KEY` in the environment in which Claude Code starts. This is the same variable that Kitaru uses. The server sends the key to the backend as a Bearer token and never prints or logs it. With no key, the server starts, and each tool returns a message that says to set the variable.
+
+5. Start Claude Code. The `evalve_*` tools show next to the Kitaru tools.
+
+The server URL must use HTTPS unless the host is localhost. When the server URL changes, run the setup command again with the new URL.
+
+### Tools
+
+| Tool | Route | What it does |
+| --- | --- | --- |
+| `evalve_loop_start` | `POST /v1/loops` | Starts a Loop and returns it at once. |
+| `evalve_loop_status` | `GET /v1/loops/{loop_id}` | The status, the outcome, the next action and each Experiment. For the owner, it also moves the Loop forward. |
+| `evalve_loop_list` | `GET /v1/loops` | The Loops of the caller, with an optional status filter and a cursor. It reads the caller's account ID from `GET /v1/me` one time. |
+| `evalve_loop_propose_experiment` | `POST /v1/loops/{loop_id}/experiments` | Sends one change (`system_prompt` or `model`) for the next Experiment. |
+| `evalve_loop_cancel` | `POST /v1/loops/{loop_id}/cancel` | Cancels a Loop. |
+| `evalve_loop_run_evidence` | `GET /v1/loops/{loop_id}/experiments/{experiment}/runs/{run}` | The failed cases and the evaluator explanations of one run. |
+
+Each tool takes the fields of the API body as typed parameters and returns the backend JSON with no change, after the version line when there is one. No tool waits for a Loop to end: the coding agent starts a Loop, then calls `evalve_loop_status` every minute or so.
+
+- **Repeats.** On a `503`, a connection error or a time limit, the server repeats the call after 2 seconds and then after 5 seconds. Then the tool returns a message that says the Loop is not lost. The time limit is 60 seconds for a start and a proposal, and 15 seconds for each other call.
+- **One Loop for each start call.** The repeats of one `evalve_loop_start` call send the same `Idempotency-Key`. A second tool call sends a new key, and the backend then answers `409` because the name is in use.
+- **Versions.** At startup the server reads `version` from the health route. When the major or minor number differs from its own, each tool result starts with one line that names the two versions and the install command. The server continues to work.
+
+### Tests
+
+```bash
+.venv/bin/pip install -e ./evalve-mcp
+.venv/bin/python -B -m unittest discover -s evalve-mcp/tests
+```
+
+The tests use a fake backend. They also check each path, method and field that the tools use against [`openapi/evalve-backend.json`](openapi/evalve-backend.json).
+
 ## Sign-in
 
 Evalve has no accounts of its own. A caller sends the same credential it would send to Kitaru:
@@ -101,6 +174,8 @@ docker build -t evalve-backend .
 The image runs `python -m evalve_backend` as a non-root user. On the Evalve server it shares the host network, listens on `127.0.0.1:8100`, and Caddy forwards `/evalve/*` to it.
 
 ## Publish
+
+The backend image and `evalve-mcp` share one version number and one `v*` tag. Before you tag, set the same version in `pyproject.toml`, in `src/evalve_backend/__init__.py` and in `evalve-mcp/pyproject.toml`. CI fails when the three differ. The tag is also the version that a Teammate installs `evalve-mcp` from.
 
 Publish from the `evalve-app/evalve-backend` repository. The Evalve server pulls the public image from GitHub's container registry by its exact digest.
 
