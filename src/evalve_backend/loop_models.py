@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictBool, Strict
 LoopStatus = Literal["running", "completed", "failed", "cancelled"]
 LoopOutcome = Literal["passed", "already_passing", "max_runs", "budget_reached", "stopped_idle", "stopped_by_user", "error"]
 NextAction = Literal["start_control", "resume_start", "collect", "replay", "retry", "needs_change",
-                     "stop_success", "stop_attempt_cap", "stop_budget", "stop_idle"]
+                     "stop_success", "stop_attempt_cap", "stop_budget", "stop_idle", "stop_incomplete"]
 ChangeType = Literal["system_prompt", "model"]
 RunOutcome = Literal["red", "green", "incomplete"]
 Nonempty = Annotated[str, Field(min_length=1)]

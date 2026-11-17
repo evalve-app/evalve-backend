@@ -468,7 +468,8 @@
               "stop_success",
               "stop_attempt_cap",
               "stop_budget",
-              "stop_idle"
+              "stop_idle",
+              "stop_incomplete"
             ],
             "title": "Action",
             "type": "string"

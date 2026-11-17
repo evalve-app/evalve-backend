@@ -29,6 +29,7 @@ END_STATES = {
     "stop_attempt_cap": ("completed", "max_runs"),
     "stop_budget": ("completed", "budget_reached"),
     "stop_idle": ("completed", "stopped_idle"),
+    "stop_incomplete": ("failed", "error"),
     "cancelled": ("cancelled", "stopped_by_user"),
     "error": ("failed", "error"),
 }
@@ -193,7 +194,8 @@ def decide(cfg: dict, state: dict, now: datetime | None = None, waiting_since: d
 
     The module reads no clock. `now` and `waiting_since` (when the last Run of the Experiment was
     collected) are given by the caller. A Loop that needs a change for more than IDLE_LIMIT stops as
-    `stop_idle`. Without both times, the idle limit is not checked.
+    `stop_idle`. Without both times, the idle limit is not checked. Two incomplete Runs in a row stop
+    the Loop as `stop_incomplete` (sc-312), so a broken setup does not use up the run cap or the budget.
     """
     experiments = state["experiments"]
     experiment = experiments[-1] if experiments else None
@@ -212,6 +214,8 @@ def decide(cfg: dict, state: dict, now: datetime | None = None, waiting_since: d
         return decision("collect" if run_id else "resume_start", experiment=experiment["number"], run_id=run_id)
     if summary["green_streak"] >= cfg["required_consecutive_greens"]:
         return decision("stop_success", experiment=experiment["number"])
+    if len(runs) >= 2 and all(run["result"]["outcome"] == "incomplete" for run in runs[-2:]):
+        return decision("stop_incomplete", reason="Two Runs in a row could not be scored.")
     if state.get("budget_stop"):
         return decision("stop_budget", reason=state["budget_stop"])
     if charged >= dollars(cfg["budget_usd"]):
