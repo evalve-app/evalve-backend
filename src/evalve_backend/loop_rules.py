@@ -224,6 +224,68 @@ def validate_candidate(cfg: dict, state: dict, override: dict, change: str, base
     return {"override": override, "change": change.strip(), "baseline_model": pinned}
 
 
+def score_run(state: dict, run: dict, replays: list[dict], evaluations: list[dict], sessions: dict[str, dict]) -> dict:
+    """Score one finished run from what Kitaru returned for it.
+
+    `replays` and `evaluations` are the run's rows and `sessions` maps each result session id to its
+    session. A run is green only when it is complete and every cohort session passes every selected
+    evaluator. The outcome is "red" when one fails and "incomplete" when the run cannot be fully scored.
+    """
+    result_ids = {r["result_session_id"] for r in replays if r.get("result_session_id")}
+    expected = {e["version_id"]: e for e in state["evaluators"]}
+    verdicts_by_session = {}
+    for row in evaluations:
+        session_id = row["session_id"]
+        evaluator_id = row.get("evaluator_version_id")
+        evaluator = expected.get(evaluator_id)
+        if session_id in result_ids and evaluator and (row.get("evaluator_params") or {}) == evaluator["params"]:
+            verdicts_by_session.setdefault(session_id, {})[evaluator_id] = row
+
+    sessions = {session_id: sessions[session_id] for session_id in result_ids if session_id in sessions}
+    rows = []
+    for replay in replays:
+        baseline_id = replay["baseline_session_id"]
+        result_id = replay.get("result_session_id")
+        session = sessions.get(result_id, {})
+        scored = verdicts_by_session.get(result_id, {})
+        verdicts = {
+            f"{e['evaluator']}@{e['version']}": {
+                "id": scored.get(eid, {}).get("id"), "passed": scored.get(eid, {}).get("passed"),
+                "explanation": scored.get(eid, {}).get("explanation"),
+            }
+            for eid, e in expected.items()
+        }
+        complete = (
+            replay["status"] == "completed" and session.get("status") == "completed" and not session.get("error")
+            and all(type(verdict["passed"]) is bool for verdict in verdicts.values())
+        )
+        rows.append({
+            "case": state["members"].get(baseline_id, baseline_id), "baseline_session_id": baseline_id,
+            "replay_id": replay["id"], "replay_status": replay["status"], "result_session_id": result_id,
+            "result_status": session.get("status"), "error": replay.get("error") or session.get("error"),
+            "passed": all(v["passed"] for v in verdicts.values()) if complete else None,
+            "evaluations": verdicts, "reply": session.get("outputs"), "cost_usd": session.get("cost"),
+        })
+    seen = {row["baseline_session_id"] for row in rows}
+    expected_members = state["members"].keys()
+    valid = (
+        run["status"] == "completed" and seen == expected_members and len(rows) == len(expected_members)
+        and len(result_ids) == len(expected_members) and all(row["passed"] is not None for row in rows)
+    )
+    failed = sum(row["passed"] is False for row in rows)
+    recorded = sum((dollars(s["cost"]) for s in sessions.values() if s.get("cost") is not None), Decimal(0))
+    return {
+        "run_id": run["id"], "run_status": run["status"], "run_error": run.get("error"),
+        "outcome": ("red" if failed else "green") if valid else "incomplete",
+        "passed": sum(row["passed"] is True for row in rows), "failed": failed,
+        "unscored": len(expected_members - seen) + sum(row["passed"] is None for row in rows),
+        "missing_session_ids": sorted(expected_members - seen),
+        "recorded_cost_usd": str(recorded),
+        "cost_incomplete": len(sessions) != len(expected_members) or any(s.get("cost") is None for s in sessions.values()),
+        "rows": rows,
+    }
+
+
 def plan_submission(cfg: dict, state: dict, step: dict, estimate: Decimal) -> dict:
     """Return {"estimate": ...} when the next replay fits the budget, else {"budget_stop": reason}."""
     if dollars(step["accounted_cost_usd"]) + estimate > dollars(cfg["budget_usd"]):

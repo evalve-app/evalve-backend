@@ -210,5 +210,81 @@ class ValidateCandidateTest(unittest.TestCase):
         self.refused({"model": "model-b", "system_prompt": "Be kind."})
 
 
+class ScoreRunTest(unittest.TestCase):
+    """A cohort of two sessions, scored by two evaluators."""
+
+    def setUp(self):
+        self.state = {
+            "members": {"recorded-1": "Case 1", "recorded-2": "Case 2"},
+            "evaluators": [
+                {"version_id": "policy-v", "evaluator": "policy", "version": 1, "params": {}},
+                {"version_id": "tone-v", "evaluator": "tone", "version": 2, "params": {"strict": True}},
+            ],
+        }
+        self.run = {"id": "run-1", "status": "completed"}
+        self.replays = [
+            {"id": f"replay-{n}", "baseline_session_id": f"recorded-{n}", "result_session_id": f"result-{n}", "status": "completed"}
+            for n in (1, 2)
+        ]
+        self.sessions = {f"result-{n}": {"status": "completed", "cost": "0.10"} for n in (1, 2)}
+        self.evaluations = [self.verdict(n, e, True) for n in (1, 2) for e in ("policy", "tone")]
+
+    def verdict(self, n, evaluator, passed):
+        params = {"policy": {}, "tone": {"strict": True}}[evaluator]
+        return {"id": f"{evaluator}-{n}", "session_id": f"result-{n}", "evaluator_version_id": f"{evaluator}-v",
+                "evaluator_params": params, "passed": passed}
+
+    def score(self):
+        return loop_rules.score_run(self.state, self.run, self.replays, self.evaluations, self.sessions)
+
+    def test_every_session_passing_every_evaluator_is_green(self):
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["passed"], scored["failed"], scored["unscored"]), ("green", 2, 0, 0))
+        self.assertEqual((scored["recorded_cost_usd"], scored["cost_incomplete"]), ("0.20", False))
+        self.assertEqual([row["case"] for row in scored["rows"]], ["Case 1", "Case 2"])
+
+    def test_one_failed_verdict_makes_the_run_red(self):
+        self.evaluations[3] = self.verdict(2, "tone", False)
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["passed"], scored["failed"]), ("red", 1, 1))
+        self.assertEqual(scored["rows"][1]["evaluations"]["tone@2"]["passed"], False)
+
+    def test_a_missing_verdict_makes_the_run_incomplete(self):
+        del self.evaluations[3]
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["unscored"]), ("incomplete", 1))
+
+    def test_a_verdict_from_other_evaluator_params_does_not_count(self):
+        self.evaluations[3] = self.verdict(2, "tone", True) | {"evaluator_params": {"strict": False}}
+        self.assertEqual(self.score()["outcome"], "incomplete")
+
+    def test_a_verdict_that_is_not_true_or_false_does_not_count(self):
+        self.evaluations[0] = self.verdict(1, "policy", None)
+        self.assertEqual(self.score()["outcome"], "incomplete")
+
+    def test_a_run_that_did_not_complete_is_incomplete(self):
+        self.run = {"id": "run-1", "status": "failed", "error": "boom"}
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["run_error"]), ("incomplete", "boom"))
+
+    def test_a_cohort_session_with_no_replay_is_reported_missing(self):
+        del self.replays[1]
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["missing_session_ids"], scored["unscored"]), ("incomplete", ["recorded-2"], 1))
+
+    def test_a_replay_or_session_that_errored_is_incomplete(self):
+        self.sessions["result-1"] = {"status": "completed", "cost": "0.10", "error": "crashed"}
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["rows"][0]["passed"]), ("incomplete", None))
+        self.sessions["result-1"] = {"status": "completed", "cost": "0.10"}
+        self.replays[0]["status"] = "failed"
+        self.assertEqual(self.score()["outcome"], "incomplete")
+
+    def test_a_missing_cost_is_flagged_and_left_out_of_the_recorded_total(self):
+        self.sessions["result-2"]["cost"] = None
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["recorded_cost_usd"], scored["cost_incomplete"]), ("green", "0.10", True))
+
+
 if __name__ == "__main__":
     unittest.main()
