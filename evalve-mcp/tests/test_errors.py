@@ -1,10 +1,14 @@
 """The repeat rule, and the messages that the coding agent gets when the backend fails."""
 
-import unittest
-
-from helpers import LOOP, START, FakeBackend, answer, refused, session, slow, text
-
+import asyncio
 import json
+import unittest
+from unittest import mock
+
+import httpx
+
+from evalve_mcp.backend import Backend
+from helpers import KEY, LOOP, SERVER_URL, START, FakeBackend, answer, refused, session, slow, text
 
 STATUS = ("evalve_loop_status", {"loop_id": "loop-1"})
 EACH_TOOL = {
@@ -71,6 +75,34 @@ class RepeatTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(message, detail)
 
 
+class TotalTimeLimitTest(unittest.IsolatedAsyncioTestCase):
+    async def test_an_answer_that_comes_in_slow_parts_counts_as_a_time_limit(self):
+        fake = FakeBackend()
+        requests = []
+
+        async def handle(request):
+            requests.append(request)
+            await asyncio.sleep(3600)
+
+        backend = Backend(SERVER_URL, KEY, version="0.1.1", transport=httpx.MockTransport(handle), sleep=fake.sleep)
+        self.addAsyncCleanup(backend.close)
+        with mock.patch("evalve_mcp.backend.FAST_SECONDS", 0.01):
+            message = await backend.loop_status("loop-1")
+        self.assertEqual((len(requests), fake.sleeps), (3, [2, 5]))
+        self.assertIn("The Loop is not lost.", message)
+
+
+class AccountTest(unittest.IsolatedAsyncioTestCase):
+    async def test_a_list_gives_a_plain_message_when_the_account_answer_has_no_id(self):
+        for me in (httpx.Response(200, text="<html>proxy</html>"), answer(200, {"name": "alyssa"})):
+            fake = FakeBackend(me)
+            async with session(fake) as client:
+                result = await client.call_tool("evalve_loop_list", {})
+            self.assertFalse(result.isError)
+            self.assertIn("gave no account ID", text(result))
+            self.assertEqual(len(fake.requests), 1)
+
+
 class VersionTest(unittest.IsolatedAsyncioTestCase):
     async def result(self, health, version="0.1.1", script=()):
         fake = FakeBackend(*script, health=health)
@@ -109,7 +141,6 @@ class VersionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(message), LOOP)
 
     async def test_a_health_call_with_no_usable_answer_gives_no_warning(self):
-        import httpx
         for health in (None, slow, httpx.Response(502, text="Bad Gateway"), answer(200, {"status": "ok"}),
                        answer(200, {"version": None}), httpx.Response(200, json=["0.2.0"])):
             with self.subTest(health=health):

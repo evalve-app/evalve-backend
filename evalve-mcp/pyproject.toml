@@ -9,7 +9,7 @@ description = "Local MCP server through which a coding agent runs Evalve Loops"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27,<1",
-    "mcp>=1.9,<2",
+    "mcp>=1.22,<2",
 ]
 
 [project.scripts]

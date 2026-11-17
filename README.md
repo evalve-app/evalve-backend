@@ -75,7 +75,7 @@ The server URL must use HTTPS unless the host is localhost. When the server URL 
 | `evalve_loop_cancel` | `POST /v1/loops/{loop_id}/cancel` | Cancels a Loop. |
 | `evalve_loop_run_evidence` | `GET /v1/loops/{loop_id}/experiments/{experiment}/runs/{run}` | The failed cases and the evaluator explanations of one run. |
 
-Each tool takes the fields of the API body as typed parameters and returns the backend JSON with no change. No tool waits for a Loop to end: the coding agent starts a Loop, then calls `evalve_loop_status` every minute or so.
+Each tool takes the fields of the API body as typed parameters and returns the backend JSON with no change, after the version line when there is one. No tool waits for a Loop to end: the coding agent starts a Loop, then calls `evalve_loop_status` every minute or so.
 
 - **Repeats.** On a `503`, a connection error or a time limit, the server repeats the call after 2 seconds and then after 5 seconds. Then the tool returns a message that says the Loop is not lost. The time limit is 60 seconds for a start and a proposal, and 15 seconds for each other call.
 - **One Loop for each start call.** The repeats of one `evalve_loop_start` call send the same `Idempotency-Key`. A second tool call sends a new key, and the backend then answers `409` because the name is in use.

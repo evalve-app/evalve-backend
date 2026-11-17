@@ -84,14 +84,17 @@ class Backend:
         return await self._call("GET", f"/v1/loops/{_segment(loop_id)}")
 
     async def list_loops(self, status: str | None, cursor: str | None) -> str:
-        async def own_loops() -> str:
-            if self._account_id is None:
-                self._account_id = (await self._send("GET", "/v1/me")).json()["id"]
-            params = {"owner_account_id": self._account_id, "status": status, "cursor": cursor}
-            params = {name: value for name, value in params.items() if value is not None}
-            return (await self._send("GET", "/v1/loops", params=params)).text
-
-        return await self._message(own_loops())
+        # The list route returns the Loops of each account. The filter needs the caller's account ID.
+        if self._account_id is None:
+            try:
+                self._account_id = str((await self._send("GET", "/v1/me")).json()["id"])
+            except BackendError as error:
+                return self._with_warning(str(error))
+            except (ValueError, KeyError, TypeError):
+                return self._with_warning(f"The backend at {self.server_url} gave no account ID. {NOT_LOST}")
+        params = {"owner_account_id": self._account_id, "status": status, "cursor": cursor}
+        params = {name: value for name, value in params.items() if value is not None}
+        return await self._call("GET", "/v1/loops", params=params)
 
     async def propose_experiment(self, loop_id: str, proposal: dict) -> str:
         return await self._call("POST", f"/v1/loops/{_segment(loop_id)}/experiments", body=proposal, timeout=SLOW_SECONDS)
@@ -103,32 +106,32 @@ class Backend:
         return await self._call("GET", f"/v1/loops/{_segment(loop_id)}/experiments/{experiment}/runs/{run}")
 
     async def _call(self, method: str, path: str, **options) -> str:
-        async def body() -> str:
-            return (await self._send(method, path, **options)).text
-
-        return await self._message(body())
-
-    async def _message(self, result: Awaitable[str]) -> str:
         try:
-            text = await result
+            text = (await self._send(method, path, **options)).text
         except BackendError as error:
             text = str(error)
+        return self._with_warning(text)
+
+    def _with_warning(self, text: str) -> str:
         return f"{self.warning}\n{text}" if self.warning else text
 
     async def _send(
         self, method: str, path: str, *, body: dict | None = None, params: dict | None = None,
-        headers: dict | None = None, timeout: float = FAST_SECONDS, hints: dict[int, str] | None = None,
+        headers: dict | None = None, timeout: float | None = None, hints: dict[int, str] | None = None,
     ) -> httpx.Response:
         if self._key is None:
             raise BackendError(NO_KEY)
         headers = {**(headers or {}), "Authorization": f"Bearer {self._key}"}
+        limit = FAST_SECONDS if timeout is None else timeout
         failure = ""
         for delay in (*REPEAT_DELAYS, None):
             try:
-                response = await self._client.request(
-                    method, self.server_url + path, json=body, params=params, headers=headers, timeout=timeout,
-                )
-            except httpx.TransportError:
+                # The httpx limit applies to each phase. The outer limit applies to the full call.
+                async with asyncio.timeout(limit):
+                    response = await self._client.request(
+                        method, self.server_url + path, json=body, params=params, headers=headers, timeout=limit,
+                    )
+            except (httpx.TransportError, TimeoutError):
                 failure = (
                     f"The backend at {self.server_url} did not answer. {NOT_LOST} If the server URL changed, "
                     "tell the Teammate to run: evalve-mcp setup --server <URL>"
