@@ -295,6 +295,21 @@ class ValidateCandidateTest(unittest.TestCase):
         self.refused({"system_prompt": "Be kind."}, cfg=loop_rules.validate_config(form(allowed_changes=["model"], allowed_models=["model-b"])))
         self.refused({"system_prompt": "Be kind."}, control_model=CONTROL_MODEL)
 
+    def test_a_value_of_the_wrong_type_is_refused_as_a_candidate_error(self):
+        # A caller catches CandidateError. A value that is not text must not raise a different error.
+        for prompt in (None, 5, ["Be kind."]):
+            with self.subTest(prompt=prompt):
+                self.refused({"system_prompt": prompt})
+        for override in (None, ["model"], "model"):
+            with self.subTest(override=override):
+                self.refused(override)
+        for model in (None, 5, ["model-b"]):
+            with self.subTest(model=model):
+                self.refused({"model": model})
+        self.state["control_model"] = None
+        self.refused({"model": "model-b"}, control_model=5)
+        self.refused({"system_prompt": "Be kind."}, change=None)
+
     def test_a_change_summary_and_exactly_one_override_are_required(self):
         self.refused({"system_prompt": "Be kind."}, change=" ")
         self.refused({})

@@ -239,7 +239,7 @@ def validate_candidate(cfg: dict, state: dict, override: dict, change: str, cont
     """
     if not isinstance(change, str) or not change.strip():
         raise CandidateError("Start a candidate with one of a model or a system prompt and a change summary.")
-    if set(override) not in ({"model"}, {"system_prompt"}):
+    if not isinstance(override, dict) or set(override) not in ({"model"}, {"system_prompt"}):
         raise CandidateError("Start a candidate with one of a model or a system prompt and a change summary.")
     pinned = state["control_model"]
     if "model" in override:
@@ -247,7 +247,7 @@ def validate_candidate(cfg: dict, state: dict, override: dict, change: str, cont
         if "model" not in cfg["allowed_changes"] or model not in cfg["allowed_models"]:
             raise CandidateError("The candidate model must be selected in the form.")
         pinned = pinned or control_model
-        if not pinned or not pinned.strip():
+        if not isinstance(pinned, str) or not pinned.strip():
             raise CandidateError("Resolve the inherited model and supply the control model before trying a model candidate.")
         if control_model and control_model != pinned:
             raise CandidateError("The inherited model is already pinned for this loop.")
@@ -259,7 +259,7 @@ def validate_candidate(cfg: dict, state: dict, override: dict, change: str, cont
         if "system_prompt" not in cfg["allowed_changes"]:
             raise CandidateError("The form must enable system prompt changes.")
         prompt = override["system_prompt"]
-        if not prompt.strip() or prompt == state["control_prompt"]:
+        if not isinstance(prompt, str) or not prompt.strip() or prompt == state["control_prompt"]:
             raise CandidateError("Provide a nonempty system prompt that changes the control prompt.")
     if any(experiment["override"] == override for experiment in state["experiments"]):
         raise CandidateError("This override has already been tried. Choose a change based on the failed cases.")
