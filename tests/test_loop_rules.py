@@ -109,6 +109,77 @@ def form(**changes) -> dict:
     } | changes
 
 
+def is_count(value, minimum: int) -> bool:
+    return type(value) is int and value >= minimum
+
+
+def parse_evalve_loop(text: str | None) -> dict | None:
+    """The dashboard's reading of a description: parseEvalveLoop in evalve-ui/src/lib/loops.ts.
+
+    A Python copy of its rules (descriptionRecord at :178, parseEvalveLoop at :190), kept as plain
+    as the original so the two can be compared line by line. It cannot see later changes there.
+    """
+    def record(prefix):
+        line = next((line for line in text.split("\n") if line.startswith(prefix)), None)
+        if line is None:
+            return None
+        try:
+            value = json.loads(line[len(prefix):])
+        except ValueError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    def text_or_none(value):
+        return value if isinstance(value, str) and value else None
+
+    def text_list(value):
+        return value if isinstance(value, list) and all(isinstance(x, str) for x in value) else None
+
+    if not text:
+        return None
+    settings = record("Evalve loop: ")
+    if settings is None or settings.get("schema_version") != 1 or settings.get("lap") != 0 or not isinstance(settings.get("loop_id"), str):
+        return None
+    greens = settings.get("required_consecutive_greens")
+    if not is_count(greens, 1):
+        return None
+
+    saved = record("Evalve result: ")
+    result = None
+    if saved and saved.get("schema_version") == 1 and saved.get("loop_id") == settings["loop_id"]:
+        status = saved.get("status")
+        if status == "stop_success":
+            if is_count(saved.get("winner_lap"), 0):
+                result = {"status": status, "winner_lap": saved["winner_lap"]}
+        elif status in ("stop_attempt_cap", "stop_budget"):
+            reason = saved.get("reason")
+            result = {"status": status, "reason": reason if isinstance(reason, str) else None}
+        elif status == "running":
+            result = {"status": status}
+
+    runs = []
+    if result and result["status"] != "running" and isinstance(saved.get("laps"), list):
+        for lap in saved["laps"]:
+            if isinstance(lap, dict) and isinstance(lap.get("experiment_id"), str) and isinstance(lap.get("runs"), list):
+                runs += [
+                    {"experiment_id": lap["experiment_id"], "run_id": run["run_id"]}
+                    for run in lap["runs"] if isinstance(run, dict) and isinstance(run.get("run_id"), str)
+                ]
+    max_attempts = settings.get("max_attempts")
+    return {
+        "required_greens": greens,
+        "setup": {
+            "name": text_or_none(settings.get("name")), "cohort_version_id": text_or_none(settings.get("cohort_version_id")),
+            "agent_version_id": text_or_none(settings.get("agent_version_id")), "evaluators": text_list(settings.get("evaluators")),
+            "allowed_changes": text_list(settings.get("allowed_changes")), "allowed_models": text_list(settings.get("allowed_models")),
+            "required_greens": greens, "max_attempts": max_attempts if type(max_attempts) is int else None,
+            "budget_usd": text_or_none(settings.get("budget_usd")),
+        },
+        "result": result,
+        "published_runs": runs,
+    }
+
+
 class ValidateConfigTest(unittest.TestCase):
     def test_a_valid_form_is_normalized_without_changing_the_input(self):
         original = form(budget_usd=1.5, cohort_version_id=COHORT_VERSION.upper())
@@ -292,7 +363,10 @@ class ScoreRunTest(unittest.TestCase):
         self.assertEqual((scored["outcome"], scored["recorded_cost_usd"], scored["cost_incomplete"]), ("green", "0.10", True))
 
 
-class DescriptionTest(unittest.TestCase):
+class LoopFixture(unittest.TestCase):
+    """A Loop with a baseline lap of three attempts and an empty candidate lap."""
+
+
     def setUp(self):
         self.cfg = loop_rules.validate_config(form(allowed_changes=["system_prompt", "model"], allowed_models=["model-b"]))
         self.state = new_state() | {
@@ -308,6 +382,8 @@ class DescriptionTest(unittest.TestCase):
             {"number": 1, "override": {"model": "model-b"}, "change": "Bigger model", "experiment_id": "exp-1", "attempts": []},
         ]
 
+
+class DescriptionTest(LoopFixture):
     def line(self, text, prefix):
         (line,) = [line for line in text.split("\n") if line.startswith(prefix)]
         return json.loads(line[len(prefix):])
@@ -370,6 +446,63 @@ class DescriptionTest(unittest.TestCase):
         meta = loop_rules.result_metadata(self.cfg, self.state)
         self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_budget", None))
         self.assertIn("exceed the budget", meta["reason"])
+
+
+class DashboardGoldenTest(LoopFixture):
+    """The published lines must parse under the dashboard's rules. See parse_evalve_loop."""
+
+    def published(self) -> str:
+        baseline = loop_rules.description(self.cfg, self.state, self.state["laps"][0])
+        return baseline + "\n" + loop_rules.RESULT_PREFIX + loop_rules.compact(loop_rules.result_metadata(self.cfg, self.state))
+
+    def test_the_baseline_description_parses_into_the_setup(self):
+        parsed = parse_evalve_loop(loop_rules.description(self.cfg, self.state, self.state["laps"][0]))
+        self.assertEqual(parsed["setup"], {
+            "name": "Test loop", "cohort_version_id": COHORT_VERSION, "agent_version_id": "agent-version",
+            "evaluators": ["policy@1"], "allowed_changes": ["system_prompt", "model"], "allowed_models": ["model-b"],
+            "required_greens": 2, "max_attempts": 10, "budget_usd": "1.00",
+        })
+        self.assertEqual((parsed["required_greens"], parsed["result"], parsed["published_runs"]), (2, None, []))
+
+    def test_only_the_baseline_line_is_the_loop_the_dashboard_reads(self):
+        self.assertIsNone(parse_evalve_loop(loop_rules.description(self.cfg, self.state, self.state["laps"][1])))
+
+    def test_a_loop_that_is_still_going_parses_as_running(self):
+        parsed = parse_evalve_loop(self.published())
+        self.assertEqual((parsed["result"], parsed["published_runs"]), ({"status": "running"}, []))
+
+    def test_a_win_parses_with_its_winning_lap_and_published_runs(self):
+        self.state["laps"][1]["attempts"] = [
+            {"number": n, "run_id": f"run-c{n}", "estimated_cost_usd": "0.10", "result": result("green")} for n in (1, 2)
+        ]
+        parsed = parse_evalve_loop(self.published())
+        self.assertEqual(parsed["result"], {"status": "stop_success", "winner_lap": 1})
+        self.assertEqual(parsed["published_runs"], [
+            {"experiment_id": "exp-0", "run_id": "run-1"}, {"experiment_id": "exp-0", "run_id": "run-2"},
+            {"experiment_id": "exp-1", "run_id": "run-c1"}, {"experiment_id": "exp-1", "run_id": "run-c2"},
+        ])
+
+    def test_each_stop_parses_with_its_reason(self):
+        self.state["laps"][0]["attempts"][2] = {"number": 3, "run_id": "run-3", "estimated_cost_usd": "0.10", "result": result("red")}
+        self.state["budget_stop"] = "The next replay was estimated at $0.10 and would exceed the budget."
+        parsed = parse_evalve_loop(self.published())
+        self.assertEqual(parsed["result"], {"status": "stop_budget", "reason": self.state["budget_stop"]})
+
+        self.state["budget_stop"] = None
+        self.cfg["max_attempts"] = 3
+        parsed = parse_evalve_loop(self.published())
+        self.assertEqual(parsed["result"], {"status": "stop_attempt_cap", "reason": "The total replay attempt cap was reached."})
+
+    def test_a_result_from_another_loop_is_ignored(self):
+        lines = self.published().split("\n")
+        lines[-1] = lines[-1].replace('"loop_id":"loop-1"', '"loop_id":"other"')
+        self.assertIsNone(parse_evalve_loop("\n".join(lines))["result"])
+
+    def test_the_parser_rejects_a_description_it_should_not_read(self):
+        for text in (None, "", "Round 0: x", 'Evalve loop: {"schema_version":2,"loop_id":"a","lap":0,"required_consecutive_greens":2}',
+                     'Evalve loop: {"schema_version":1,"loop_id":"a","lap":0,"required_consecutive_greens":0}'):
+            with self.subTest(text=text):
+                self.assertIsNone(parse_evalve_loop(text))
 
 
 if __name__ == "__main__":
