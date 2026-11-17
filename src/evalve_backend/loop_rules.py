@@ -6,7 +6,15 @@ Ported from evalve-ui/public/skills/evalve-loop/0.1.0/scripts/loop.py. The state
 
 from __future__ import annotations
 
+import copy
+import re
+import uuid
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlsplit
+
+
+class ConfigError(ValueError):
+    """The Loop settings are not usable. The message says what to fix."""
 
 
 def dollars(value) -> Decimal:
@@ -17,6 +25,99 @@ def dollars(value) -> Decimal:
     if not result.is_finite() or result < 0:
         raise ValueError(f"Invalid dollar amount: {value!r}")
     return result
+
+
+class CandidateError(ValueError):
+    """The proposed change cannot be tried. The message says why."""
+
+
+def config_dollars(cfg: dict, key: str) -> Decimal:
+    try:
+        return dollars(cfg[key])
+    except ValueError as error:
+        raise ConfigError(f"{key}: {error}") from None
+
+
+def version_ref(ref: str) -> tuple[str, int]:
+    if not isinstance(ref, str) or not re.fullmatch(r"\S(?:[^\r\n]*\S)?@[1-9][0-9]*", ref):
+        raise ConfigError(f"Use an exact name@version reference, got {ref!r}.")
+    name, version = ref.rsplit("@", 1)
+    return name, int(version)
+
+
+def validate_config(form: dict) -> dict:
+    """Check the Loop settings and return a normalized copy. Raises ConfigError."""
+    cfg = copy.deepcopy(form)
+    for key in ("name", "cohort_version_id", "evaluators", "tool_policy", "allowed_changes",
+                "required_consecutive_greens", "max_attempts", "budget_usd"):
+        if key not in cfg:
+            raise ConfigError(f"Missing {key!r}.")
+    cfg.setdefault("allowed_models", [])
+    if cfg.get("server_url") is not None:
+        server = cfg["server_url"]
+        if not isinstance(server, str) or any(ch.isspace() for ch in server):
+            raise ConfigError("server_url must be the Kitaru server's HTTP(S) URL.")
+        try:
+            target = urlsplit(server)
+            valid = (
+                target.scheme in ("http", "https") and target.hostname
+                and target.username is None and not (target.query or target.fragment)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ConfigError("server_url must be the Kitaru server's HTTP(S) URL without credentials, query, or fragment.")
+        cfg["server_url"] = server.rstrip("/")
+    if not isinstance(cfg["name"], str) or not re.sub(r"[^a-z0-9]+", "-", cfg["name"].lower()).strip("-"):
+        raise ConfigError("Give the loop a name containing letters or numbers.")
+    try:
+        cfg["cohort_version_id"] = str(uuid.UUID(cfg["cohort_version_id"]))
+    except (ValueError, TypeError, AttributeError):
+        raise ConfigError("cohort_version_id must be the exact cohort-version UUID.") from None
+    required, cap = cfg["required_consecutive_greens"], cfg["max_attempts"]
+    if type(required) is not int or type(cap) is not int or not 1 <= required <= cap:
+        raise ConfigError("The streak and attempt cap must be positive integers, with the cap at least the streak.")
+    budget = config_dollars(cfg, "budget_usd")
+    if budget <= 0:
+        raise ConfigError("budget_usd must be positive.")
+    cfg["budget_usd"] = str(budget)
+
+    changes = cfg["allowed_changes"]
+    if not isinstance(changes, list) or not changes or any(x not in ("system_prompt", "model") for x in changes):
+        raise ConfigError("allowed_changes must contain system_prompt, model, or both.")
+    models = cfg["allowed_models"]
+    if not isinstance(models, list) or any(not isinstance(x, str) or not x.strip() for x in models):
+        raise ConfigError("allowed_models must contain model IDs.")
+    if "model" in changes and not models:
+        raise ConfigError("Resolve the models available to the replay worker before allowing model changes.")
+    if cfg.get("agent_version") is not None:
+        version_ref(cfg["agent_version"])
+    if cfg.get("baseline_model") is not None and (
+        not isinstance(cfg["baseline_model"], str) or not cfg["baseline_model"].strip()
+    ):
+        raise ConfigError("baseline_model must be the inherited model ID.")
+    evaluators = cfg["evaluators"]
+    if not isinstance(evaluators, list) or not evaluators:
+        raise ConfigError("Select at least one binary evaluator.")
+    seen = set()
+    for evaluator in evaluators:
+        if not isinstance(evaluator, dict):
+            raise ConfigError("Each evaluator must provide a ref and optional params.")
+        ref = version_ref(evaluator.get("ref"))
+        if ref in seen or not isinstance(evaluator.get("params", {}), dict):
+            raise ConfigError("Evaluator references must be unique and params must be objects.")
+        seen.add(ref)
+    policy = cfg["tool_policy"]
+    if not isinstance(policy, dict) or not isinstance(policy.get("default"), dict):
+        raise ConfigError("Supply the project's replay tool policy, including its default.")
+    if not isinstance(policy.get("tools", {}), dict):
+        raise ConfigError("tool_policy.tools must be an object.")
+    policy.setdefault("tools", {})
+    if any(not isinstance(p, dict) or not p.get("type") for p in [policy["default"], *policy["tools"].values()]):
+        raise ConfigError("Every replay tool policy must specify a type.")
+    if cfg.get("baseline_estimate_usd") is not None:
+        cfg["baseline_estimate_usd"] = str(config_dollars(cfg, "baseline_estimate_usd"))
+    return cfg
 
 
 def green_streak(attempts: list[dict]) -> int:
@@ -86,6 +187,41 @@ def decide(cfg: dict, state: dict) -> dict:
     if (baseline_complete and "red" in outcomes) or (lap["number"] > 0 and outcomes[-1] == "red"):
         return decision("start_candidate", lap=lap["number"] + 1)
     return decision("retry" if outcomes[-1] == "incomplete" else "replay", lap=lap["number"])
+
+
+def validate_candidate(cfg: dict, state: dict, override: dict, change: str, baseline_model: str | None) -> dict:
+    """Check one proposed Round. Raises CandidateError.
+
+    `override` is {"model": id} or {"system_prompt": text}; the caller reads any prompt file.
+    Returns the override, the trimmed change summary and the baseline model to pin for the Loop.
+    """
+    if not isinstance(change, str) or not change.strip():
+        raise CandidateError("Start a candidate with one of a model or a system prompt and a change summary.")
+    if set(override) not in ({"model"}, {"system_prompt"}):
+        raise CandidateError("Start a candidate with one of a model or a system prompt and a change summary.")
+    pinned = state["baseline_model"]
+    if "model" in override:
+        model = override["model"]
+        if "model" not in cfg["allowed_changes"] or model not in cfg["allowed_models"]:
+            raise CandidateError("The candidate model must be selected in the form.")
+        pinned = pinned or baseline_model
+        if not pinned or not pinned.strip():
+            raise CandidateError("Resolve the inherited model and supply the baseline model before trying a model candidate.")
+        if baseline_model and baseline_model != pinned:
+            raise CandidateError("The inherited model is already pinned for this loop.")
+        if model == pinned:
+            raise CandidateError("Choose a model that differs from the baseline.")
+    else:
+        if baseline_model is not None:
+            raise CandidateError("Supply the baseline model only with a model candidate.")
+        if "system_prompt" not in cfg["allowed_changes"]:
+            raise CandidateError("The form must enable system prompt changes.")
+        prompt = override["system_prompt"]
+        if not prompt.strip() or prompt == state["baseline_prompt"]:
+            raise CandidateError("Provide a nonempty system prompt that changes the baseline.")
+    if any(lap["override"] == override for lap in state["laps"]):
+        raise CandidateError("This override has already been tried. Choose a change based on the failed cases.")
+    return {"override": override, "change": change.strip(), "baseline_model": pinned}
 
 
 def plan_submission(cfg: dict, state: dict, step: dict, estimate: Decimal) -> dict:
