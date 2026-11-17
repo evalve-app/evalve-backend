@@ -272,6 +272,11 @@ class ScoreRunTest(unittest.TestCase):
         scored = self.score()
         self.assertEqual((scored["outcome"], scored["missing_session_ids"], scored["unscored"]), ("incomplete", ["recorded-2"], 1))
 
+    def test_two_replays_of_one_session_do_not_cover_the_cohort(self):
+        self.replays[1]["baseline_session_id"] = "recorded-1"
+        scored = self.score()
+        self.assertEqual((scored["outcome"], scored["missing_session_ids"]), ("incomplete", ["recorded-2"]))
+
     def test_a_replay_or_session_that_errored_is_incomplete(self):
         self.sessions["result-1"] = {"status": "completed", "cost": "0.10", "error": "crashed"}
         scored = self.score()
