@@ -91,10 +91,19 @@ def evaluator_configs(specs: list[dict]) -> list[dict]:
     }) for spec in specs]
 
 
-def _evaluator_keys(evaluators: list[dict]) -> list[str]:
-    fields = ("evaluator", "version", "params", "connection_id")
-    return sorted(loop_rules.compact({field: item.get(field) or ({} if field == "params" else None) for field in fields})
-                  for item in evaluators)
+def _evaluator_keys(evaluators: list[dict], pinned_connections: set[str]) -> list[str]:
+    """Comparable evaluator settings. Kitaru resolves an omitted connection to the provider's default,
+    so a connection counts only for an evaluator whose spec pinned one."""
+    return sorted(loop_rules.compact({
+        "evaluator": item.get("evaluator"), "version": item.get("version"), "params": item.get("params") or {},
+        "connection_id": item.get("connection_id") if item.get("evaluator") in pinned_connections else None,
+    }) for item in evaluators)
+
+
+def _tool_policy(policy: dict | None) -> dict:
+    # Kitaru may leave out an empty `tools` map, and the stored setup always has one.
+    policy = _without_nulls(policy or {})
+    return policy | {"tools": policy.get("tools") or {}}
 
 
 class KitaruExecutor:
@@ -134,11 +143,13 @@ class KitaruExecutor:
     @staticmethod
     def _check(spec: ExperimentSpec, experiment: dict) -> None:
         """The backend does not repair an experiment that someone changed. The Loop fails."""
+        pinned = {item["evaluator"] for item in spec.evaluators if item["connection_id"] is not None}
         same = (
             experiment.get("agent_id") == spec.agent_id
             and _without_nulls(experiment.get("override") or {}) == spec.override
-            and _without_nulls(experiment.get("tool_policy")) == _without_nulls(spec.tool_policy)
-            and _evaluator_keys(experiment.get("evaluators") or []) == _evaluator_keys(evaluator_configs(spec.evaluators))
+            and _tool_policy(experiment.get("tool_policy")) == _tool_policy(spec.tool_policy)
+            and _evaluator_keys(experiment.get("evaluators") or [], pinned)
+            == _evaluator_keys(evaluator_configs(spec.evaluators), pinned)
         )
         if not same:
             raise ExecutionFailed(f"The Kitaru experiment {spec.name} no longer matches the Loop's settings.")

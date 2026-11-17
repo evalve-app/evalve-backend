@@ -1,6 +1,7 @@
 """The Kitaru executor against the fake Kitaru: finding its own work again after a restart (sc-315)."""
 
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 
 import httpx
@@ -121,6 +122,22 @@ class EnsureExperimentTest(ExecutorTest):
                 with self.assertRaises(ExecutionFailed) as caught:
                     await self.executor.ensure_experiment(experiment_spec(experiment_id=experiment_id))
                 self.assertIn("no longer matches", str(caught.exception))
+
+    async def test_values_that_kitaru_fills_in_do_not_count_as_a_change(self):
+        experiment_id = await self.experiment()
+        stored = self.kitaru.experiments[experiment_id]
+        # Kitaru resolves the omitted connection to the provider's default and leaves out empty tools.
+        stored["evaluators"][0]["connection_id"] = "00000000-0000-4000-8000-00000000c0de"
+        stored["tool_policy"] = {"default": {"type": "replay"}}
+        self.assertEqual(await self.executor.ensure_experiment(experiment_spec(experiment_id=experiment_id)), experiment_id)
+
+    async def test_a_pinned_connection_that_changed_fails_the_loop(self):
+        pinned = experiment_spec()
+        pinned = experiment_spec(evaluators=[pinned.evaluators[0] | {"connection_id": "connection-a"}])
+        experiment_id = await self.executor.ensure_experiment(pinned)
+        self.kitaru.experiments[experiment_id]["evaluators"][0]["connection_id"] = "connection-b"
+        with self.assertRaises(ExecutionFailed):
+            await self.executor.ensure_experiment(replace(pinned, experiment_id=experiment_id))
 
     async def test_a_recorded_experiment_that_is_gone_fails_the_loop(self):
         with self.assertRaises(ExecutionFailed) as caught:
