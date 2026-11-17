@@ -381,12 +381,23 @@ def experiment_summaries(state: dict) -> list[dict]:
     return result
 
 
-def result_metadata(cfg: dict, state: dict, now: datetime | None = None, waiting_since: datetime | None = None) -> dict:
-    """The body of the `Evalve result:` line. Its words are the ones the dashboard reads."""
+def result_metadata(cfg: dict, state: dict, now: datetime | None = None, waiting_since: datetime | None = None,
+                    *, ended: str | None = None, reason: str | None = None) -> dict:
+    """The body of the `Evalve result:` line. Its words are the ones the dashboard reads.
+
+    `ended` is the stop that ended the Loop (a key of END_STATES or `stop_success`) when the caller
+    already ended it, for example by a cancel or a Kitaru error that `decide` cannot see. Its `reason`
+    replaces the reason of the decision.
+    """
     step = decide(cfg, state, now, waiting_since)
+    status = step["action"] if step["action"].startswith("stop_") else "running"
+    if ended is not None:
+        if ended != "stop_success" and ended not in END_STATES:
+            raise ValueError(f"Not the end of a Loop: {ended!r}")
+        status, step = ended, step | {"reason": reason}
     return {
-        "schema_version": 1, "loop_id": state["loop_id"], "status": step["action"] if step["action"].startswith("stop_") else "running",
-        "winner_lap": step.get("experiment") if step["action"] == "stop_success" else None,
+        "schema_version": 1, "loop_id": state["loop_id"], "status": status,
+        "winner_lap": step.get("experiment") if status == "stop_success" else None,
         "baseline_model": state["control_model"],
         "attempts": step["runs"], "recorded_cost_usd": step["recorded_cost_usd"],
         "accounted_cost_usd": step["accounted_cost_usd"], "reason": step.get("reason"), "laps": experiment_summaries(state),

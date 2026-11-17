@@ -485,6 +485,18 @@ class DescriptionTest(LoopFixture):
         self.assertEqual((meta["status"], meta["winner_lap"]), ("stop_budget", None))
         self.assertIn("exceed the budget", meta["reason"])
 
+    def test_a_loop_the_caller_ended_reports_that_end(self):
+        # decide still sees a Run to resume. The caller cancelled the Loop or saw a Kitaru error.
+        for ended, reason in (("cancelled", None), ("error", "Kitaru refused the run.")):
+            with self.subTest(ended):
+                meta = loop_rules.result_metadata(self.cfg, self.state, ended=ended, reason=reason)
+                self.assertEqual((meta["status"], meta["winner_lap"], meta["reason"]), (ended, None, reason))
+                self.assertEqual(meta["attempts"], 3)
+
+    def test_an_end_that_is_not_a_stop_is_refused(self):
+        with self.assertRaises(ValueError):
+            loop_rules.result_metadata(self.cfg, self.state, ended="running")
+
 
 class DashboardGoldenTest(LoopFixture):
     """The published lines must parse under the dashboard's rules. See parse_evalve_loop."""
