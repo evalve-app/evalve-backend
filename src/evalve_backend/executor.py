@@ -18,6 +18,8 @@ from evalve_backend.kitaru_api import KitaruApi, KitaruConflict, KitaruNotFound,
 
 # A run created this long before its Run row's submit started can still be the one it submitted.
 ADOPTION_WINDOW = timedelta(seconds=60)
+# A start request that timed out (the client waits 10 s) can still create its run after this long.
+START_SETTLES_WITHIN = timedelta(minutes=2)
 # Kitaru keeps a key for 900 s from when it receives the request, which is after the submit started.
 # The margin covers a slow request and a small clock difference.
 KEY_TRUSTED_FOR = timedelta(seconds=900 - 120)

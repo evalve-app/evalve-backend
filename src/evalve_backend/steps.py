@@ -17,7 +17,9 @@ import httpx
 
 from evalve_backend import loop_rules
 from evalve_backend.auth import Account
-from evalve_backend.executor import AmbiguousRun, ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec
+from evalve_backend.executor import (
+    START_SETTLES_WITHIN, AmbiguousRun, ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec,
+)
 from evalve_backend.kitaru_api import KitaruApi, KitaruNotFound, KitaruRejected, KitaruTransient
 from evalve_backend.loop_steps import PreparedStart, StepUnavailable
 from evalve_backend.preflight import preflight, run_spec_hash
@@ -148,6 +150,10 @@ class _Step:
                 except AmbiguousRun:
                     # Never cancel a run that may be someone else's.
                     run_id = None
+                if run_id is None and self.now - run["submit_started_at"] < START_SETTLES_WITHIN:
+                    # A start that timed out can still create its run, so one empty look proves nothing.
+                    # The Loop keeps running and the route asks the caller to try the cancel again.
+                    return
                 if run_id is not None:
                     await to_thread(self.store.record_run_id, self.owner, self.loop_id, experiment["number"],
                                     run["number"], run_id)

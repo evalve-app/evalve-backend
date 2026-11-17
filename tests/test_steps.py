@@ -143,10 +143,17 @@ class RestartSafetyTest(StepsTest):
         self.assertEqual((first.headers["idempotency-key"], first.content), (second.headers["idempotency-key"], second.content))
         self.assertEqual(len(self.kitaru.runs), 1)
 
-    def submit_started_16_minutes_ago(self):
+    def submit_started_ago(self, minutes):
         (loop,) = self.store._loops.values()
-        loop["experiments"][-1]["runs"][-1]["submit_started_at"] -= timedelta(minutes=16)
+        loop["experiments"][-1]["runs"][-1]["submit_started_at"] -= timedelta(minutes=minutes)
+
+    def submit_started_16_minutes_ago(self):
+        self.submit_started_ago(16)
         self.kitaru.expire_keys()
+
+    def cancel(self):
+        (loop_id,) = self.store._loops
+        return self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=OWNER)
 
     def test_a_call_after_the_key_expired_adopts_the_run_and_starts_no_second_run(self):
         self.kitaru.lose_next_reply("POST", RUNS)
@@ -173,10 +180,22 @@ class RestartSafetyTest(StepsTest):
     def test_a_cancel_after_a_start_that_never_reached_kitaru_starts_nothing(self):
         self.kitaru.fail("POST", RUNS, 503)
         self.assertEqual(self.start().status_code, 503)
-        (loop_id,) = self.store._loops
-        self.assertEqual(self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=OWNER).json()["status"], "cancelled")
+        # One empty look right after the start proves nothing, so the cancel waits.
+        self.assertEqual(self.cancel().status_code, 503)
+        self.submit_started_ago(3)
+        self.assertEqual(self.cancel().json()["status"], "cancelled")
         self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
         self.assertEqual(self.kitaru.runs, {})
+
+    def test_a_cancel_stops_a_run_that_a_timed_out_start_creates_late(self):
+        self.kitaru.fail("POST", RUNS, 504)
+        self.assertEqual(self.start().status_code, 503)
+        self.assertEqual(self.cancel().status_code, 503)
+        (loop,) = self.store._loops.values()
+        # Kitaru finishes the first request after the backend stopped waiting.
+        late = self.kitaru.add_run(loop["experiments"][0]["experiment_id"])["id"]
+        self.assertEqual(self.cancel().json()["status"], "cancelled")
+        self.assertEqual(self.kitaru.runs[late]["status"], "canceled")
 
     def test_a_cancel_after_a_lost_start_reply_stops_the_run_without_sending_the_start_again(self):
         self.kitaru.lose_next_reply("POST", RUNS)
