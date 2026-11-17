@@ -1,6 +1,8 @@
 import os
+import socket
 import unittest
 import uuid
+from unittest.mock import Mock, patch
 
 import psycopg
 
@@ -72,9 +74,10 @@ class DatabaseTest(unittest.TestCase):
         self.assertFalse(database.ensure_database(settings(), connect=server.connect))
 
     def test_connections_verify_the_server_certificate(self):
-        server = FakeServer(databases=("postgres", "evalve"))
-        self.assertTrue(database.ping(settings(), connect=server.connect))
-        [options] = server.connections
+        connect = Mock()
+        with patch.object(database, "_query_answers", return_value=True):
+            self.assertTrue(database.ping(settings(), connect=connect))
+        options = connect.call_args.kwargs
         self.assertEqual(options["dbname"], "evalve")
         self.assertEqual((options["sslmode"], options["sslrootcert"]), ("verify-full", "/run/rds-ca.pem"))
         self.assertEqual(options["connect_timeout"], 5)
@@ -85,6 +88,24 @@ class DatabaseTest(unittest.TestCase):
         with self.assertLogs("evalve_backend.database", level="WARNING") as captured:
             self.assertFalse(database.ping(settings(), connect=server.connect))
         self.assertNotIn("database-password-value", "\n".join(captured.output))
+
+    def test_ping_closes_a_connection_stalled_after_sending_the_query(self):
+        client, server = socket.socketpair()
+        with client, server:
+            connection = Mock()
+            connection.close.side_effect = client.close
+            connection.pgconn.socket = client.fileno()
+            connection.pgconn.flush.return_value = 0
+            connection.pgconn.is_busy.return_value = 1
+            with patch.object(database, "HEALTH_QUERY_TIMEOUT", 0.01):
+                with self.assertLogs("evalve_backend.database", level="WARNING") as captured:
+                    self.assertFalse(database.ping(settings(), connect=Mock(return_value=connection)))
+
+            connection.pgconn.send_query.assert_called_once_with(b"SELECT 1")
+            connection.pgconn.get_result.assert_not_called()
+            connection.close.assert_called_once_with()
+            self.assertEqual(client.fileno(), -1)
+            self.assertIn("TimeoutError", captured.output[0])
 
     def test_startup_retries_until_the_database_server_is_up(self):
         attempts = []
