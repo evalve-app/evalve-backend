@@ -7,6 +7,7 @@ import httpx
 
 from evalve_backend import loop_rules
 from evalve_backend.auth import Account
+from evalve_backend.auth import Credential
 from evalve_backend.kitaru_api import KitaruApi, KitaruTransient
 from evalve_backend.loop_steps import PreflightRejected
 from evalve_backend.preflight import preflight, run_spec_hash
@@ -35,7 +36,7 @@ class PreflightTest(unittest.IsolatedAsyncioTestCase):
 
     async def run_preflight(self, **changes):
         async with httpx.AsyncClient(base_url=KITARU_URL, transport=self.kitaru.transport()) as client:
-            return await preflight(KitaruApi(client, AUTHORIZATION), config(**changes), ACCOUNT, KITARU_URL)
+            return await preflight(KitaruApi(client, Credential.bearer(AUTHORIZATION)), config(**changes), ACCOUNT, KITARU_URL)
 
     async def refused(self, message: str, **changes):
         with self.assertRaises(PreflightRejected) as caught:

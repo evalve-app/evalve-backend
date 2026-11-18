@@ -36,6 +36,18 @@ class SettingsTest(unittest.TestCase):
                 with self.assertRaisesRegex(SettingsError, "EVALVE_DB_NAME"):
                     Settings.from_environment(ENV | {"EVALVE_DB_NAME": name})
 
+    def test_the_session_cookie_name_has_a_default_and_can_be_turned_off(self):
+        self.assertEqual(Settings.from_environment(ENV).session_cookie_name, "evalve_session")
+        named = Settings.from_environment(ENV | {"EVALVE_SESSION_COOKIE_NAME": "kitaru_session"})
+        self.assertEqual(named.session_cookie_name, "kitaru_session")
+        self.assertEqual(Settings.from_environment(ENV | {"EVALVE_SESSION_COOKIE_NAME": ""}).session_cookie_name, "")
+
+    def test_the_session_cookie_name_must_be_a_plain_cookie_name(self):
+        for name in ("evalve session", "a=b", "a;b", "sess\r\nX-Injected: 1", "é", "x" * 65):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(SettingsError, "EVALVE_SESSION_COOKIE_NAME"):
+                    Settings.from_environment(ENV | {"EVALVE_SESSION_COOKIE_NAME": name})
+
     def test_ports_must_be_numbers(self):
         with self.assertRaisesRegex(SettingsError, "EVALVE_PORT"):
             Settings.from_environment(ENV | {"EVALVE_PORT": "eighty"})

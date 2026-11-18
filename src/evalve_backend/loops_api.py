@@ -17,7 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 
 from evalve_backend import loop_models as models, loop_rules
-from evalve_backend.auth import Account, require_account, verify_account
+from evalve_backend.auth import Account, Credential, request_credential, require_account, verify_account
 from evalve_backend.loop_steps import LoopSteps, PreflightRejected, StepUnavailable
 from evalve_backend.store import LoopStart, RunPlan, Store
 
@@ -34,7 +34,7 @@ class LoopRoute(APIRoute):
                 if problem["type"] == "json_invalid":
                     # FastAPI decodes JSON before calling dependencies. Check
                     # identity here, too, before returning a validation error.
-                    await verify_account(request, request.headers.get("authorization"))
+                    await verify_account(request)
                 location = ".".join(str(part) for part in problem["loc"])
                 raise HTTPException(422, f"Invalid or missing input at {location}.") from None
             response.headers["Cache-Control"] = "no-store"
@@ -55,7 +55,7 @@ router = APIRouter(
 @dataclass(frozen=True)
 class Caller:
     account: Account
-    authorization: str = field(repr=False)
+    credential: Credential = field(repr=False)
 
     @property
     def id(self) -> str:
@@ -63,7 +63,8 @@ class Caller:
 
 
 def get_caller(request: Request, account: Annotated[Account, Depends(require_account)]) -> Caller:
-    return Caller(account, request.headers["authorization"])
+    # require_account has accepted this credential, so it is not None here.
+    return Caller(account, request_credential(request))
 
 
 def get_store(request: Request) -> Store:
@@ -215,7 +216,7 @@ async def _submit_first(
 ) -> dict:
     first = experiment["runs"][0]
     if first["run_id"] is None and loop["status"] == "running":
-        await _step(_execution(steps).submit_pending(caller.id, loop["loop_id"], experiment["number"], caller.authorization))
+        await _step(_execution(steps).submit_pending(caller.id, loop["loop_id"], experiment["number"], caller.credential))
         loop = await _load(store, loop["loop_id"], owner=caller.id)
         first = loop["experiments"][experiment["number"]]["runs"][0]
         if first["run_id"] is None and loop["status"] == "running":
@@ -239,7 +240,7 @@ async def start_loop(
     result = await to_thread(store.find_start, caller.id, idempotency_key, request_hash)
     if result is None:
         try:
-            prepared = await _step(_execution(steps).preflight(config, caller.account, caller.authorization))
+            prepared = await _step(_execution(steps).preflight(config, caller.account, caller.credential))
         except PreflightRejected as error:
             raise HTTPException(422, str(error)) from None
         slug = re.sub(r"[^a-z0-9]+", "-", config["name"].lower()).strip("-")
@@ -282,7 +283,7 @@ async def loop_status(loop_id: str, caller: SignedIn, store: LoopStore, steps: S
             await _expire(store, loop, decision)
             loop = await _load(store, loop_id)
         elif steps is not None and decision["action"] != "needs_change":
-            await _step(steps.advance(caller.id, loop_id, caller.authorization))
+            await _step(steps.advance(caller.id, loop_id, caller.credential))
             loop = await _load(store, loop_id)
     return await _detail(store, loop)
 
@@ -366,7 +367,7 @@ async def cancel_loop(loop_id: str, caller: SignedIn, store: LoopStore, steps: S
     """Cancel a Loop that belongs to the caller. A terminal Loop stays terminal."""
     loop = await _load(store, loop_id, owner=caller.id)
     if loop["status"] == "running":
-        await _step(_execution(steps).cancel(caller.id, loop_id, caller.authorization))
+        await _step(_execution(steps).cancel(caller.id, loop_id, caller.credential))
         loop = await _load(store, loop_id, owner=caller.id)
         if loop["status"] == "running":
             raise HTTPException(503, "Kitaru has not confirmed cancellation. Try again.")

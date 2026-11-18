@@ -7,6 +7,7 @@ from datetime import timedelta
 import httpx
 
 from evalve_backend.executor import AmbiguousRun, ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec
+from evalve_backend.auth import Credential
 from evalve_backend.kitaru_api import KitaruApi, KitaruTransient
 from fake_kitaru import AGENT_ID, AGENT_VERSION_ID, COHORT_VERSION_ID, EVALUATOR_VERSION_ID, FakeKitaru
 from helpers import KITARU_URL, TOKEN
@@ -31,7 +32,7 @@ class ExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.kitaru = FakeKitaru(AUTHORIZATION)
         client = httpx.AsyncClient(base_url=KITARU_URL, transport=self.kitaru.transport())
         self.addAsyncCleanup(client.aclose)
-        self.executor = KitaruExecutor(KitaruApi(client, AUTHORIZATION))
+        self.executor = KitaruExecutor(KitaruApi(client, Credential.bearer(AUTHORIZATION)))
 
     def run_spec(self, k: int = 1, **changes) -> RunSpec:
         values = {"idempotency_key": f"evalve-loop-1-exp-0-run-{k}", "cohort_version_id": COHORT_VERSION_ID,
