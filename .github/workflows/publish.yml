@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # write: the job creates the GitHub release of the tag and attaches openapi.json.
+  contents: write
   packages: write
 
 jobs:
@@ -30,3 +31,15 @@ jobs:
         run: |
           echo "Pin this in evalve-deploy:" >> "$GITHUB_STEP_SUMMARY"
           echo '`ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}`' >> "$GITHUB_STEP_SUMMARY"
+      # evalve-ui generates its typed client from this file. The tests already fail when the
+      # committed contract differs from the app, so the job attaches it as it is.
+      - name: Attach the API contract to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cp openapi/evalve-backend.json openapi.json
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --generate-notes
+          gh release upload "$TAG" openapi.json --clobber
