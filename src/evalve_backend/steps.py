@@ -82,7 +82,7 @@ class KitaruLoopSteps:
             except ExecutionFailed as error:
                 await step.end("error", str(error))
             except KitaruRejected as error:
-                await step.end("error", f"Kitaru refused a request of the Loop: {error.detail}")
+                await step.end("error", f"Kitaru refused a request of the Loop ({error.describe()})")
         finally:
             await to_thread(lock.release)
 

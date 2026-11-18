@@ -30,7 +30,7 @@ async def _read(call, missing: str):
     except KitaruNotFound:
         raise PreflightRejected(missing) from None
     except KitaruRejected as error:
-        raise PreflightRejected(f"Kitaru refused a preflight read: {error.detail}") from None
+        raise PreflightRejected(f"Kitaru refused a preflight read ({error.describe()})") from None
 
 
 async def _agent_version(api: KitaruApi, cfg: dict, agent_id: str, members: list[dict]) -> dict:

@@ -88,7 +88,36 @@ class KitaruApiTest(unittest.IsolatedAsyncioTestCase):
             await self.failing(409, "Experiment name 'x' is already registered").create_experiment({"name": "x"}, "key")
         with self.assertRaises(KitaruRejected) as caught:
             await self.failing(422, [{"msg": "bad"}]).get_run("run-1")
-        self.assertEqual(caught.exception.detail, "no details")
+        self.assertEqual(caught.exception.detail, "bad")
+
+    async def test_a_validation_refusal_names_the_field_and_the_rule_and_never_the_input(self):
+        errors = [
+            {"type": "value_error", "loc": ["body"], "msg": "Value error, a and b are mutually exclusive",
+             "input": {"system_prompt": "SECRET PROMPT"}, "ctx": {"error": "SECRET CONTEXT"}},
+            {"type": "missing", "loc": ["body", "cohort_version_id"], "msg": "Field required", "input": None},
+            {"type": "odd"}, "not an object",
+        ]
+        with self.assertRaises(KitaruRejected) as caught:
+            await self.failing(422, errors).start_run("01a1ef43-4c90-72a4-8ca2-e48a73b10001", {}, "key")
+        refusal = caught.exception
+        self.assertEqual(refusal.detail,
+                         "body: Value error, a and b are mutually exclusive; body.cohort_version_id: Field required")
+        self.assertEqual(refusal.request, "POST /experiments/{id}/runs")
+        self.assertEqual(refusal.describe(), f"POST /experiments/{{id}}/runs, HTTP 422: {refusal.detail}")
+        self.assertNotIn("SECRET", refusal.describe())
+
+    async def test_a_refusal_with_no_usable_detail_says_so_and_stays_short(self):
+        for body in ([], [{"loc": ["body"]}], {"nested": "object"}, 7):
+            with self.subTest(body=body), self.assertRaises(KitaruRejected) as caught:
+                await self.failing(422, body).get_run("run-1")
+            self.assertEqual(caught.exception.detail, "no details")
+        api = self.use(lambda request: httpx.Response(422, text="<html>"))
+        with self.assertRaises(KitaruRejected) as caught:
+            await api.get_run("run-1")
+        self.assertEqual(caught.exception.describe(), "GET /experiment-runs/{id}, HTTP 422: no details")
+        with self.assertRaises(KitaruRejected) as caught:
+            await self.failing(422, [{"loc": ["body"], "msg": "x" * 500}]).get_run("run-1")
+        self.assertEqual(len(caught.exception.detail), 300)
 
     async def test_a_success_that_is_not_json_is_transient(self):
         api = self.use(lambda request: httpx.Response(200, text="<html>"))
