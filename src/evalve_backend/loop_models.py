@@ -82,11 +82,6 @@ class LoopSummary(BaseModel):
     updated_at: datetime
 
 
-class LoopList(BaseModel):
-    items: list[LoopSummary]
-    next_cursor: str | None
-
-
 class RunResult(BaseModel):
     run_id: str
     run_status: str
@@ -187,6 +182,22 @@ class NeedsChange(BaseModel):
     overrides_tried: list[dict[ChangeType, str]]
     failed_cases: list[CaseEvidence]
     idle_deadline: datetime | None
+
+
+class LoopListItem(LoopSummary):
+    """One row of the Loop list. It has what the dashboard list shows, so the list needs no other call."""
+
+    hypothesis: str | None
+    experiments: int = Field(description="The number of Experiments of the Loop. The Control Experiment counts.")
+    spend: Spend
+    next_action: NextAction | None = Field(
+        description="The next action of a running Loop, as in the status call. Null for a Loop at an end state.",
+    )
+
+
+class LoopList(BaseModel):
+    items: list[LoopListItem]
+    next_cursor: str | None
 
 
 class LoopDetail(LoopSummary):

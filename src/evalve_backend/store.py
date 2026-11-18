@@ -60,8 +60,8 @@ class Store(Protocol):
     def find_start(self, owner: str, key: str, request_hash: str) -> StartResult | None: ...
     def start_loop(self, start: LoopStart, first_run: RunPlan) -> StartResult: ...
     def get_loop(self, owner: str | None, loop_id: str) -> dict | None: ...
-    def list_loops(self, owner: str | None, *, status: str | None = None, limit: int = 50,
-                   before: tuple[datetime, str] | None = None) -> list[dict]: ...
+    def list_loops(self, owner: str | None, *, status: str | None = None, agent_id: str | None = None,
+                   limit: int = 50, before: tuple[datetime, str] | None = None) -> list[dict]: ...
     def get_run(self, owner: str | None, loop_id: str, experiment: int, run: int) -> dict | None: ...
     def expire_waiting_loop(self, owner: str, loop_id: str, waiting_since: datetime, reason: str) -> bool: ...
     def add_experiment(self, owner: str, loop_id: str, number: int, override: dict, change: str,
@@ -220,36 +220,58 @@ class PostgresStore:
             """, (owner, owner, loop_id)).fetchone()
             if loop is None:
                 return None
-            experiments = list(connection.execute("""
-                SELECT number, name, override, change, experiment_id
-                FROM experiments WHERE loop_id = %s ORDER BY number
-            """, (loop_id,)))
-            runs_by_experiment = {experiment["number"]: [] for experiment in experiments}
-            for run in connection.execute("""
-                SELECT experiment_number, number, estimated_cost_usd, cohort_version_id,
-                       agent_version_id, submit_started_at, start_sent_at, run_id, result, collected_at
-                FROM runs WHERE loop_id = %s ORDER BY experiment_number, number
-            """, (loop_id,)):
-                runs_by_experiment[run.pop("experiment_number")].append(run)
-            for experiment in experiments:
-                experiment["runs"] = runs_by_experiment[experiment["number"]]
-            loop["experiments"] = experiments
+            self._add_experiments(connection, [loop])
             return loop
 
-    def list_loops(self, owner: str | None, *, status: str | None = None, limit: int = 50,
-                   before: tuple[datetime, str] | None = None) -> list[dict]:
+    @staticmethod
+    def _add_experiments(connection, loops: list[dict]) -> None:
+        """Give each Loop its ordered Experiment and Run summaries, with two queries for all of them."""
+        by_loop = {loop["loop_id"]: loop for loop in loops}
+        for loop in loops:
+            loop["experiments"] = []
+        if not loops:
+            return
+        ids = list(by_loop)
+        experiments = {}
+        for experiment in connection.execute("""
+            SELECT loop_id, number, name, override, change, experiment_id
+            FROM experiments WHERE loop_id = ANY(%s) ORDER BY loop_id, number
+        """, (ids,)):
+            loop_id = experiment.pop("loop_id")
+            experiment["runs"] = []
+            experiments[loop_id, experiment["number"]] = experiment
+            by_loop[loop_id]["experiments"].append(experiment)
+        for run in connection.execute("""
+            SELECT loop_id, experiment_number, number, estimated_cost_usd, cohort_version_id,
+                   agent_version_id, submit_started_at, start_sent_at, run_id, result, collected_at
+            FROM runs WHERE loop_id = ANY(%s) ORDER BY loop_id, experiment_number, number
+        """, (ids,)):
+            experiments[run.pop("loop_id"), run.pop("experiment_number")]["runs"].append(run)
+
+    def list_loops(self, owner: str | None, *, status: str | None = None, agent_id: str | None = None,
+                   limit: int = 50, before: tuple[datetime, str] | None = None) -> list[dict]:
+        """Return one page of Loops, newest first, each in the same form as `get_loop`.
+
+        The list shows the spend and the next action of each Loop, and both come from the Runs.
+        One snapshot and three queries serve the page, however many Loops it has.
+        """
         before_time, before_id = before if before is not None else (None, None)
         with self._connect() as connection:
-            return list(connection.execute("""
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            loops = list(connection.execute("""
                 SELECT id AS loop_id, owner_account_id, name, slug, agent_id, status, outcome, reason,
-                       created_at, updated_at
+                       config, preflight, pending_change, waiting_since, created_at, updated_at
                 FROM loops
                 WHERE (%(owner)s::text IS NULL OR owner_account_id = %(owner)s)
                   AND (%(status)s::text IS NULL OR status = %(status)s)
+                  AND (%(agent_id)s::text IS NULL OR agent_id = %(agent_id)s)
                   AND (%(before_time)s::timestamptz IS NULL OR (created_at, id) < (%(before_time)s, %(before_id)s))
                 ORDER BY created_at DESC, id DESC
                 LIMIT %(limit)s
-            """, {"owner": owner, "status": status, "limit": limit, "before_time": before_time, "before_id": before_id}))
+            """, {"owner": owner, "status": status, "agent_id": agent_id, "limit": limit,
+                  "before_time": before_time, "before_id": before_id}))
+            self._add_experiments(connection, loops)
+            return loops
 
     def get_run(self, owner: str | None, loop_id: str, experiment: int, run: int) -> dict | None:
         """Load a Run with its evidence, including before it has a Kitaru ID."""

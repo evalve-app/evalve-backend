@@ -139,6 +139,15 @@ class StoreContract:
         self.assertEqual([item["loop_id"] for item in self.store.list_loops(OWNER, status="running")], [loop_id])
         self.assertEqual(self.store.list_loops(OWNER, status="completed"), [])
         self.assertEqual({item["loop_id"] for item in self.store.list_loops(None)}, {loop_id, other.loop_id})
+        # The agent filter, alone and with the other filters.
+        self.assertEqual([item["loop_id"] for item in self.store.list_loops(None, agent_id="different-agent")], [other.loop_id])
+        self.assertEqual([item["loop_id"] for item in self.store.list_loops(None, agent_id=START.agent_id)], [loop_id])
+        self.assertEqual(self.store.list_loops(OWNER, agent_id="different-agent"), [])
+        self.assertEqual(self.store.list_loops(None, agent_id=START.agent_id, status="completed"), [])
+        self.assertEqual(self.store.list_loops(None, agent_id="no-such-agent"), [])
+        # A list item has the same form as one Loop, with its Experiments and Runs.
+        self.assertEqual(self.store.list_loops(OWNER), [self.store.get_loop(OWNER, loop_id)])
+        self.assertEqual(self.store.list_loops(outsider), [self.store.get_loop(outsider, other.loop_id)])
         self.assertEqual(self.store.get_loop(None, loop_id)["owner_account_id"], OWNER)
         self.assertEqual(self.store.get_run(None, loop_id, 0, 1), self.store.get_run(OWNER, loop_id, 0, 1))
 
