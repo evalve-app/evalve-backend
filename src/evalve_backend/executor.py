@@ -190,8 +190,9 @@ class KitaruExecutor:
         return await self._start(experiment_id, run)
 
     async def _start(self, experiment_id: str, run: RunSpec) -> str:
+        # Kitaru refuses a body that sets both this field and the deprecated `evaluate_baselines`.
         body = {"cohort_version_id": run.cohort_version_id, "agent_version_id": run.agent_version_id,
-                "evaluate_baselines": False, "baseline_evaluation_mode": "none"}
+                "baseline_evaluation_mode": "none"}
         started = await self._api.start_run(experiment_id, body, run.idempotency_key)
         return started["id"]
 
