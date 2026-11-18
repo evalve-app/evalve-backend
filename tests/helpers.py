@@ -34,9 +34,10 @@ class FakeKitaru:
         return self.respond(request)
 
 
-def client(kitaru: FakeKitaru | None = None, database_ok: bool = True, **app_options) -> TestClient:
+def client(kitaru: FakeKitaru | None = None, database_ok: bool = True, app_settings: dict | None = None,
+           **app_options) -> TestClient:
     app = create_app(
-        settings(),
+        settings(**(app_settings or {})),
         kitaru_transport=httpx.MockTransport(kitaru or FakeKitaru()),
         database_ping=lambda _settings: database_ok,
         **app_options,

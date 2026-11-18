@@ -11,7 +11,7 @@ Every route sits under `/evalve`, so one hostname can serve Kitaru and Evalve.
 | Route | Sign-in | What it does |
 | --- | --- | --- |
 | `GET /evalve/health` | None | `200` with `"database": "ok"` when the backend can query its database. `503` when it can't. Both include `version` and `image`, so a deployment can confirm which build is serving. |
-| `GET /evalve/v1/me` | Kitaru credential | `200 {"id": "...", "name": "..."}` for the Kitaru account behind the credential. |
+| `GET /evalve/v1/me` | Kitaru credential or dashboard session | `200 {"id": "...", "name": "..."}` for the Kitaru account behind the credential. |
 
 The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the account that started a Loop can propose, cancel, or advance it. A status read by another account returns stored results.
 
@@ -92,18 +92,33 @@ The tests use a fake backend. They also check each path, method and field that t
 
 ## Sign-in
 
-Evalve has no accounts of its own. A caller sends the same credential it would send to Kitaru:
+Evalve has no accounts of its own. A caller sends the same credential it would send to Kitaru, in one of two ways.
+
+**A key or a token.** The Evalve MCP and scripts use this:
 
 ```
 Authorization: Bearer <Kitaru API key or token>
 ```
 
-The backend passes that header to `GET /api/v1/accounts/me` on the Kitaru server named in `EVALVE_KITARU_URL` and accepts the request if Kitaru does.
+**The dashboard session.** A browser that signed in to Kitaru through the dashboard sends Kitaru's session cookie and the CSRF token of the login answer:
+
+```
+Cookie: evalve_session=<session token>
+X-CSRF-Token: <csrf_token>
+```
+
+The backend passes the credential to `GET /api/v1/accounts/me` on the Kitaru server named in `EVALVE_KITARU_URL` and accepts the request if Kitaru does. It uses the same credential for each Kitaru call that it makes for the caller.
 
 - **Only the configured Kitaru server is asked.** Nothing in a request can change which server that is.
-- **The credential is never stored or logged.** It is passed to Kitaru and dropped.
-- **A missing, invalid or expired credential gets `401`.** So does a deactivated account.
+- **The credential is never stored or logged.** It is passed to Kitaru and dropped. This includes the cookie and the CSRF token.
+- **A missing, invalid or expired credential gets `401`.** So does a deactivated account, and a session with a missing or wrong `X-CSRF-Token`.
 - **If Kitaru can't answer, the caller gets `503`,** never a pass.
+- **The `Authorization` header wins.** When a request has the header and the cookie, the header is the credential and the cookie is ignored. Kitaru uses the same order.
+- **Kitaru does the CSRF check.** The backend passes the cookie as a cookie, so Kitaru checks the CSRF token on every request, also on a `GET`. The backend has no CSRF check of its own. That check and the `SameSite=Lax` attribute of the cookie are the protection against cross-site requests.
+- **Only the session cookie is passed on.** The backend does not send the caller's other cookies to Kitaru, and it keeps no cookie from a Kitaru answer.
+- **Both ways have the same rights.** No route treats a dashboard session differently from a key.
+
+The browser sends the cookie only to the host that set it. So the dashboard must reach the backend on its own host: `evalve-deploy` sends `/evalve/*` on `dashboard.<hostname>` to the backend. A session lasts 1 hour, and Kitaru does not renew it.
 
 ## Settings
 
@@ -123,6 +138,7 @@ Read from the environment when the process starts.
 | `EVALVE_PORT` | No | `8100` | Port to listen on |
 | `EVALVE_DB_WAIT_SECONDS` | No | `120` | How long startup waits for PostgreSQL |
 | `EVALVE_IMAGE` | No | | The image reference this container was started from. The health route reports it |
+| `EVALVE_SESSION_COOKIE_NAME` | No | `evalve_session` | The name of Kitaru's dashboard session cookie. It must be the same as `KITARU_SERVER_AUTH_COOKIE_NAME`. An empty value turns cookie sign-in off |
 
 ## Run it locally
 

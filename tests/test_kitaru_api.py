@@ -5,6 +5,7 @@ import unittest
 
 import httpx
 
+from evalve_backend.auth import Credential
 from evalve_backend.kitaru_api import (
     KitaruApi, KitaruConflict, KitaruNotFound, KitaruRejected, KitaruTransient, canonical,
 )
@@ -23,7 +24,7 @@ class KitaruApiTest(unittest.IsolatedAsyncioTestCase):
 
         client = httpx.AsyncClient(base_url=KITARU_URL, transport=httpx.MockTransport(handle))
         self.addAsyncCleanup(client.aclose)
-        return KitaruApi(client, AUTHORIZATION)
+        return KitaruApi(client, Credential.bearer(AUTHORIZATION))
 
     def failing(self, status, detail="Nope."):
         return self.use(lambda request: httpx.Response(status, json={"detail": detail}))
@@ -119,6 +120,25 @@ class KitaruApiTest(unittest.IsolatedAsyncioTestCase):
             await self.failing(422, [{"loc": ["body"], "msg": "x" * 500}]).get_run("run-1")
         self.assertEqual(len(caught.exception.detail), 300)
 
+    async def test_a_dashboard_session_sends_its_cookie_and_csrf_token_on_every_call(self):
+        requests: list[httpx.Request] = []
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"items": [], "next_cursor": None, "id": "x"})
+
+        client = httpx.AsyncClient(base_url=KITARU_URL, transport=httpx.MockTransport(answer))
+        self.addAsyncCleanup(client.aclose)
+        api = KitaruApi(client, Credential.session("evalve_session", "session-token-value", "csrf-token-value"))
+        await api.get_run("run-1")
+        await api.list_replays("run-1")
+        await api.start_run("exp-1", {"cohort_version_id": "c"}, "key-1")
+        for request in requests:
+            self.assertEqual(request.headers["cookie"], "evalve_session=session-token-value")
+            self.assertEqual(request.headers["x-csrf-token"], "csrf-token-value")
+            self.assertNotIn("authorization", request.headers)
+        self.assertNotIn("session-token-value", repr(api) + repr(Credential.session("evalve_session", "session-token-value", "csrf")))
+
     async def test_a_success_that_is_not_json_is_transient(self):
         api = self.use(lambda request: httpx.Response(200, text="<html>"))
         with self.assertRaises(KitaruTransient):
@@ -137,7 +157,7 @@ class KitaruApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(secret, text)
 
     def test_the_client_hides_the_key_in_its_repr(self):
-        self.assertNotIn(TOKEN, repr(KitaruApi(httpx.AsyncClient(), AUTHORIZATION)))
+        self.assertNotIn(TOKEN, repr(KitaruApi(httpx.AsyncClient(), Credential.bearer(AUTHORIZATION))))
 
 
 if __name__ == "__main__":

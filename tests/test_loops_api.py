@@ -43,8 +43,14 @@ FAILED_CASE = {
 }
 
 
+SESSION = {"Cookie": "evalve_session=session-token-value", "X-CSRF-Token": "csrf-token-value"}
+
+
 def identity(request):
     assert request.url.path == "/api/v1/accounts/me"
+    if "Authorization" not in request.headers:
+        session = (request.headers.get("Cookie"), request.headers.get("X-CSRF-Token"))
+        return httpx.Response(200, json=ACCOUNT) if session == (SESSION["Cookie"], SESSION["X-CSRF-Token"]) else httpx.Response(401)
     authorization = request.headers["Authorization"]
     if authorization in (AUTH["Authorization"], "Bearer alternate-token"):
         return httpx.Response(200, json=ACCOUNT)
@@ -64,7 +70,8 @@ class FakeSteps:
         self.preflight_error = None
         self.accepted_runs = {}
 
-    async def preflight(self, config, account, authorization):
+    async def preflight(self, config, account, credential):
+        authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("preflight", account.id, authorization))
         if self.preflight_error:
             raise self.preflight_error
@@ -73,7 +80,8 @@ class FakeSteps:
         plan = RunPlan(Decimal("0.20"), config["cohort_version_id"], "agent-v2", datetime.now(timezone.utc))
         return PreparedStart("agent-1", preflight, plan)
 
-    async def submit_pending(self, owner, loop_id, experiment, authorization):
+    async def submit_pending(self, owner, loop_id, experiment, credential):
+        authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("submit", owner, authorization))
         experiment_id = f"kitaru-experiment-{loop_id}-{experiment}"
         self.store.record_experiment_id(owner, loop_id, experiment, experiment_id)
@@ -83,10 +91,12 @@ class FakeSteps:
             raise StepUnavailable(authorization)
         self.store.record_run_id(owner, loop_id, experiment, 1, run_id)
 
-    async def advance(self, owner, loop_id, authorization):
+    async def advance(self, owner, loop_id, credential):
+        authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("advance", owner, authorization))
 
-    async def cancel(self, owner, loop_id, authorization):
+    async def cancel(self, owner, loop_id, credential):
+        authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("cancel", owner, authorization))
         if self.cancel_unavailable:
             raise StepUnavailable(authorization)
@@ -118,6 +128,19 @@ class LoopApiTest(unittest.TestCase):
         self.assertTrue(self.store.collect_run(
             ACCOUNT["id"], loop_id, 0, 1, result, datetime.now(timezone.utc) - age, needs_change=True,
         ))
+
+    def test_a_dashboard_session_runs_a_loop_with_its_cookie_and_csrf_token(self):
+        response = self.start(headers=SESSION)
+        self.assertEqual(response.status_code, 201, response.text)
+        loop_id = response.json()["loop_id"]
+        self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=SESSION).status_code, 200)
+        self.assertEqual(self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=SESSION).status_code, 200)
+        self.assertEqual([call[0] for call in self.steps.calls], ["preflight", "submit", "advance", "cancel"])
+        # Each step gets the session as it arrived, so its Kitaru calls pass the CSRF check too.
+        self.assertTrue(all(call[2] == SESSION for call in self.steps.calls), self.steps.calls)
+        # The same account with a key sees the same Loop: no route treats the two differently.
+        self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=AUTH).json()["loop_id"], loop_id)
+        self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers={"Cookie": SESSION["Cookie"]}).status_code, 401)
 
     def test_equivalent_start_reuses_existing_loop_before_preflight(self):
         loop_id = self.make_loop()
@@ -332,6 +355,22 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(set(models["LoopDetail"]["properties"]["status"]["enum"]), {"running", "completed", "failed", "cancelled"})
         self.assertIn("passed", models["LoopDetail"]["properties"]["outcome"]["anyOf"][0]["enum"])
         self.assertIn("needs_change", models["LoopNext"]["properties"]["action"]["enum"])
+
+    def test_each_signed_in_route_declares_both_ways_to_sign_in(self):
+        schema = create_app(settings()).openapi()
+        schemes = schema["components"]["securitySchemes"]
+        self.assertEqual((schemes["SessionCookie"]["in"], schemes["SessionCookie"]["name"]), ("cookie", "evalve_session"))
+        self.assertEqual((schemes["CsrfToken"]["in"], schemes["CsrfToken"]["name"]), ("header", "X-CSRF-Token"))
+        both = [{"HTTPBearer": []}, {"SessionCookie": [], "CsrfToken": []}]
+        signed_in = 0
+        for path, operations in schema["paths"].items():
+            for operation in operations.values():
+                if path == "/evalve/health":
+                    self.assertNotIn("security", operation)
+                else:
+                    self.assertEqual(operation["security"], both, path)
+                    signed_in += 1
+        self.assertGreater(signed_in, 5)
 
     def test_all_loop_operations_document_the_plain_validation_error(self):
         paths = create_app(settings()).openapi()["paths"]

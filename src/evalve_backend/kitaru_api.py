@@ -1,6 +1,7 @@
-"""The Kitaru calls of the Loop steps. Each call uses the caller's Authorization header.
+"""The Kitaru calls of the Loop steps. Each call uses the caller's credential.
 
-The header is passed through for one request and is never stored or logged. Bodies are never logged
+The credential is an Authorization header, or the dashboard session cookie with its CSRF token.
+It is passed through for one request and is never stored or logged. Bodies are never logged
 either: a log line names only the method and the HTTP status. Kitaru fingerprints the raw body bytes
 of a request with an Idempotency-Key, so every body is written by one canonical serializer.
 """
@@ -11,6 +12,8 @@ import json
 import logging
 
 import httpx
+
+from evalve_backend.auth import Credential
 
 logger = logging.getLogger(__name__)
 
@@ -94,16 +97,16 @@ def _route(method: str, path: str) -> str:
 class KitaruApi:
     """The Kitaru REST calls that a Loop needs, made with one caller's credential."""
 
-    def __init__(self, client: httpx.AsyncClient, authorization: str):
+    def __init__(self, client: httpx.AsyncClient, credential: Credential):
         self._client = client
-        self._authorization = authorization
+        self._credential = credential
 
     def __repr__(self) -> str:
         return "KitaruApi()"
 
     async def _send(self, method: str, path: str, *, params: dict | None = None, body: dict | None = None,
                     idempotency_key: str | None = None) -> dict:
-        headers = {"Authorization": self._authorization}
+        headers = dict(self._credential.headers)
         content = None
         if body is not None:
             headers["Content-Type"] = "application/json"

@@ -3,10 +3,23 @@
 Evalve has no accounts of its own. A caller sends the same Kitaru credential it
 would send to Kitaru, and Kitaru decides whether it is valid. The credential is
 passed through to Kitaru and is never stored or logged.
+
+A caller signs in one of two ways:
+
+- `Authorization: Bearer <Kitaru API key or token>`. The Evalve MCP does this.
+- The dashboard session: Kitaru's session cookie with the `X-CSRF-Token` header.
+  The backend passes both to Kitaru as they are, and Kitaru checks the CSRF token
+  on every request. The backend has no CSRF check of its own.
+
+When a request has an `Authorization` header, that header is the credential and
+the cookie is ignored. Kitaru uses the same order.
 """
 
 import logging
-from dataclasses import dataclass
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Annotated
 
 import httpx
@@ -17,12 +30,62 @@ logger = logging.getLogger(__name__)
 
 ACCOUNT_PATH = "/api/v1/accounts/me"
 MAX_HEADER_LENGTH = 4096
+CSRF_HEADER = "X-CSRF-Token"
+# What a cookie value can hold (RFC 6265). It has no space, quote, comma, semicolon or backslash, so
+# a value that matches cannot add a second cookie or a second header to the request for Kitaru.
+_COOKIE_VALUE = re.compile(r"[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+")
 
 
 @dataclass(frozen=True)
 class Account:
     id: str
     name: str
+
+
+@dataclass(frozen=True)
+class Credential:
+    """What the caller sent to prove who it is: the headers to send to Kitaru for this caller.
+
+    Either `Authorization`, or `Cookie` with `X-CSRF-Token`. The values never go into a repr.
+    """
+
+    headers: Mapping[str, str] = field(repr=False)
+
+    @classmethod
+    def bearer(cls, authorization: str) -> "Credential":
+        return cls(MappingProxyType({"Authorization": authorization}))
+
+    @classmethod
+    def session(cls, cookie_name: str, cookie_value: str, csrf_token: str | None) -> "Credential":
+        headers = {"Cookie": f"{cookie_name}={cookie_value}"}
+        if csrf_token is not None:
+            headers[CSRF_HEADER] = csrf_token
+        return cls(MappingProxyType(headers))
+
+
+def read_credential(request: Request, cookie_name: str) -> Credential | None:
+    """The credential of a request, or None when it has none that can be passed to Kitaru.
+
+    A session with no `X-CSRF-Token` header is passed on without one, and Kitaru then refuses a
+    dashboard session. Only the session cookie is passed on, never the caller's other cookies.
+    """
+    authorization = request.headers.get("authorization")
+    if authorization is not None:
+        # The header is the credential, valid or not. The cookie is not a second try.
+        return Credential.bearer(authorization) if _is_bearer(authorization) else None
+    if not cookie_name:
+        return None
+    session = request.cookies.get(cookie_name)
+    if not _is_cookie_value(session):
+        return None
+    csrf_token = request.headers.get(CSRF_HEADER)
+    if csrf_token is not None and not _is_cookie_value(csrf_token):
+        return None
+    return Credential.session(cookie_name, session, csrf_token)
+
+
+def request_credential(request: Request) -> Credential | None:
+    return read_credential(request, request.app.state.session_cookie_name)
 
 
 class NotSignedIn(Exception):
@@ -33,16 +96,16 @@ class KitaruUnavailable(Exception):
     """Kitaru could not answer, so the caller's identity is unknown."""
 
 
-async def current_account(kitaru: httpx.AsyncClient, authorization: str | None) -> Account:
-    """Return the Kitaru account behind an Authorization header.
+async def current_account(kitaru: httpx.AsyncClient, credential: Credential | None) -> Account:
+    """Return the Kitaru account behind a credential.
 
     `kitaru` is the client for the configured Kitaru server. The caller has no
     say in which server is asked.
     """
-    if not _is_bearer(authorization):
+    if credential is None:
         raise NotSignedIn
     try:
-        response = await kitaru.get(ACCOUNT_PATH, headers={"Authorization": authorization})
+        response = await kitaru.get(ACCOUNT_PATH, headers=dict(credential.headers))
     except httpx.HTTPError as error:
         # Log the kind of failure only. An httpx error can carry the request.
         logger.warning("Kitaru did not answer the sign-in check (%s).", type(error).__name__)
@@ -77,21 +140,31 @@ def _is_bearer(authorization: str | None) -> bool:
     return scheme.lower() == "bearer" and bool(credential.strip())
 
 
+def _is_cookie_value(value: str | None) -> bool:
+    return bool(value) and len(value) <= MAX_HEADER_LENGTH and _COOKIE_VALUE.fullmatch(value) is not None
+
+
 async def require_account(
     request: Request,
     bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(HTTPBearer(auto_error=False))],
 ) -> Account:
-    """Resolve the caller through Kitaru, or refuse the request."""
-    return await verify_account(request, request.headers.get("authorization") if bearer else None)
+    """Resolve the caller through Kitaru, or refuse the request.
+
+    `bearer` is here so that the API contract names the Bearer scheme. `read_credential` reads the request.
+    """
+    return await verify_account(request)
 
 
-async def verify_account(request: Request, authorization: str | None) -> Account:
+async def verify_account(request: Request) -> Account:
     try:
-        return await current_account(request.app.state.kitaru, authorization)
+        return await current_account(request.app.state.kitaru, request_credential(request))
     except NotSignedIn:
         raise HTTPException(
             status_code=401,
-            detail="Sign in to Kitaru and send its credential as a Bearer token.",
+            detail=(
+                "Sign in to Kitaru. Send its credential as a Bearer token, or send the dashboard "
+                "session cookie with the X-CSRF-Token header."
+            ),
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
     except KitaruUnavailable:

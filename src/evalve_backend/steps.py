@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import httpx
 
 from evalve_backend import loop_rules
-from evalve_backend.auth import Account
+from evalve_backend.auth import Account, Credential
 from evalve_backend.executor import (
     START_SETTLES_WITHIN, AmbiguousRun, ExecutionFailed, ExperimentSpec, KitaruExecutor, RunGone, RunSpec,
 )
@@ -50,22 +50,22 @@ class KitaruLoopSteps:
         self._kitaru_url = kitaru_url
         self._clock = clock
 
-    async def preflight(self, config: dict, account: Account, authorization: str) -> PreparedStart:
+    async def preflight(self, config: dict, account: Account, credential: Credential) -> PreparedStart:
         try:
-            return await preflight(KitaruApi(self._kitaru, authorization), config, account, self._kitaru_url)
+            return await preflight(KitaruApi(self._kitaru, credential), config, account, self._kitaru_url)
         except KitaruTransient:
             raise StepUnavailable from None
 
-    async def submit_pending(self, owner: str, loop_id: str, experiment: int, authorization: str) -> None:
-        await self._locked(owner, loop_id, authorization, lambda step: step.submit_pending(experiment))
+    async def submit_pending(self, owner: str, loop_id: str, experiment: int, credential: Credential) -> None:
+        await self._locked(owner, loop_id, credential, lambda step: step.submit_pending(experiment))
 
-    async def advance(self, owner: str, loop_id: str, authorization: str) -> None:
-        await self._locked(owner, loop_id, authorization, lambda step: step.advance())
+    async def advance(self, owner: str, loop_id: str, credential: Credential) -> None:
+        await self._locked(owner, loop_id, credential, lambda step: step.advance())
 
-    async def cancel(self, owner: str, loop_id: str, authorization: str) -> None:
-        await self._locked(owner, loop_id, authorization, lambda step: step.cancel())
+    async def cancel(self, owner: str, loop_id: str, credential: Credential) -> None:
+        await self._locked(owner, loop_id, credential, lambda step: step.cancel())
 
-    async def _locked(self, owner: str, loop_id: str, authorization: str,
+    async def _locked(self, owner: str, loop_id: str, credential: Credential,
                       action: Callable[[_Step], Awaitable[None]]) -> None:
         # A second call does not wait. A status call shows the stored state, and a start, change or
         # cancel answers 503 because its Run is not confirmed yet.
@@ -73,7 +73,7 @@ class KitaruLoopSteps:
         if lock is None:
             return
         try:
-            api = KitaruApi(self._kitaru, authorization)
+            api = KitaruApi(self._kitaru, credential)
             step = _Step(self._store, api, KitaruExecutor(api), owner, loop_id, self._clock())
             try:
                 await action(step)

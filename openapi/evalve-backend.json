@@ -1523,9 +1523,21 @@
       }
     },
     "securitySchemes": {
+      "CsrfToken": {
+        "description": "The csrf_token of the Kitaru login answer. Kitaru checks it on every request.",
+        "in": "header",
+        "name": "X-CSRF-Token",
+        "type": "apiKey"
+      },
       "HTTPBearer": {
         "scheme": "bearer",
         "type": "http"
+      },
+      "SessionCookie": {
+        "description": "The dashboard session cookie of Kitaru. A deployment can change the name with EVALVE_SESSION_COOKIE_NAME, and an empty name turns this way to sign in off.",
+        "in": "cookie",
+        "name": "evalve_session",
+        "type": "apiKey"
       }
     }
   },
@@ -1673,6 +1685,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "List Loops",
@@ -1771,6 +1787,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "Start Loop",
@@ -1849,6 +1869,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "Loop Status",
@@ -1927,6 +1951,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "Cancel Loop",
@@ -2025,6 +2053,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "Propose Experiment",
@@ -2123,6 +2155,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "Run Evidence",
@@ -2211,6 +2247,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "Final Report",
@@ -2238,6 +2278,10 @@
         "security": [
           {
             "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
           }
         ],
         "summary": "Me"

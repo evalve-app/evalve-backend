@@ -26,6 +26,9 @@ class Settings:
     port: int = 8100
     # The image this process was started from, when the deployment tells it.
     image: str | None = None
+    # The name of Kitaru's dashboard session cookie. The deployment sets the same name for Kitaru
+    # (KITARU_SERVER_AUTH_COOKIE_NAME). An empty value turns cookie sign-in off.
+    session_cookie_name: str = "evalve_session"
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -51,6 +54,10 @@ class Settings:
         db_name = env.get("EVALVE_DB_NAME", "evalve")
         if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", db_name):
             raise SettingsError("EVALVE_DB_NAME must be a lowercase PostgreSQL identifier.")
+        cookie_name = env.get("EVALVE_SESSION_COOKIE_NAME", "evalve_session")
+        # The name goes into a Cookie header, so it must be a plain cookie name.
+        if cookie_name and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", cookie_name):
+            raise SettingsError("EVALVE_SESSION_COOKIE_NAME must be a cookie name of letters, digits, '_', '.' or '-'.")
         return cls(
             kitaru_url=kitaru_url,
             db_host=env["EVALVE_DB_HOST"].strip(),
@@ -63,6 +70,7 @@ class Settings:
             host=env.get("EVALVE_HOST", "127.0.0.1"),
             port=_port(env, "EVALVE_PORT", 8100),
             image=env.get("EVALVE_IMAGE") or None,
+            session_cookie_name=cookie_name,
         )
 
 
