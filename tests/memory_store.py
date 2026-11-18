@@ -100,14 +100,14 @@ class MemoryStore(Store):
                     del run["evidence"]
         return loop
 
-    def list_loops(self, owner, *, status=None, limit=50, before=None):
+    def list_loops(self, owner, *, status=None, agent_id=None, limit=50, before=None):
         def order(loop):
             return loop["created_at"], loop["loop_id"]
 
-        fields = ("loop_id", "owner_account_id", "name", "slug", "agent_id", "status", "outcome", "reason", "created_at", "updated_at")
         loops = sorted(self._loops.values(), key=order, reverse=True)
-        return [{field: loop[field] for field in fields} for loop in loops
+        return [self.get_loop(None, loop["loop_id"]) for loop in loops
                 if (owner is None or loop["owner_account_id"] == owner) and (status is None or loop["status"] == status)
+                and (agent_id is None or loop["agent_id"] == agent_id)
                 and (before is None or order(loop) < before)][:limit]
 
     def get_run(self, owner, loop_id, experiment, run):

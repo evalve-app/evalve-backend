@@ -190,6 +190,15 @@ async def _detail(store: Store, loop: dict) -> dict:
     return {**loop, **_totals(loop), "setup": loop["config"], "next": decision, "needs": needs}
 
 
+def _list_item(loop: dict) -> dict:
+    """One row of the Loop list, from the same rules as the status call, so the two agree."""
+    return {
+        **loop, "hypothesis": loop["config"].get("hypothesis"), "experiments": len(loop["experiments"]),
+        "spend": _totals(loop)["spend"],
+        "next_action": _choose(loop)["action"] if loop["status"] == "running" else None,
+    }
+
+
 def _cursor(item: dict) -> str:
     raw = json.dumps([item["created_at"].isoformat(), item["loop_id"]]).encode()
     return base64.urlsafe_b64encode(raw).decode()
@@ -265,12 +274,22 @@ async def start_loop(
 async def list_loops(
     caller: SignedIn, store: LoopStore, status: models.LoopStatus | None = None,
     owner_account_id: Annotated[str | None, Query(min_length=1, description="Filter by the Loop owner's Kitaru account ID.")] = None,
+    agent_id: Annotated[str | None, Query(min_length=1, description="Filter by the Kitaru agent ID of the Loop.")] = None,
     cursor: Annotated[str | None, Query(max_length=512)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ):
-    """List Loops across the deployment, newest first."""
-    rows = await to_thread(store.list_loops, owner_account_id, status=status, limit=limit + 1, before=_before(cursor))
-    return {"items": rows[:limit], "next_cursor": _cursor(rows[limit - 1]) if len(rows) > limit else None}
+    """List Loops across the deployment, newest first.
+
+    The list reads the Loop store only. It makes no Kitaru call apart from the identity check, and
+    it does not move a Loop.
+    """
+    rows = await to_thread(
+        store.list_loops, owner_account_id, status=status, agent_id=agent_id, limit=limit + 1, before=_before(cursor),
+    )
+    return {
+        "items": [_list_item(loop) for loop in rows[:limit]],
+        "next_cursor": _cursor(rows[limit - 1]) if len(rows) > limit else None,
+    }
 
 
 @router.get("/{loop_id}", response_model=models.LoopDetail, responses=errors(404))

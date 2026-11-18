@@ -427,7 +427,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/LoopSummary"
+              "$ref": "#/components/schemas/LoopListItem"
             },
             "title": "Items",
             "type": "array"
@@ -449,6 +449,144 @@
           "next_cursor"
         ],
         "title": "LoopList",
+        "type": "object"
+      },
+      "LoopListItem": {
+        "description": "One row of the Loop list. It has what the dashboard list shows, so the list needs no other call.",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "experiments": {
+            "description": "The number of Experiments of the Loop. The Control Experiment counts.",
+            "title": "Experiments",
+            "type": "integer"
+          },
+          "hypothesis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hypothesis"
+          },
+          "loop_id": {
+            "title": "Loop Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "next_action": {
+            "anyOf": [
+              {
+                "enum": [
+                  "start_control",
+                  "resume_start",
+                  "collect",
+                  "replay",
+                  "retry",
+                  "needs_change",
+                  "stop_success",
+                  "stop_attempt_cap",
+                  "stop_budget",
+                  "stop_idle",
+                  "stop_incomplete"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The next action of a running Loop, as in the status call. Null for a Loop at an end state.",
+            "title": "Next Action"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "passed",
+                  "already_passing",
+                  "max_runs",
+                  "budget_reached",
+                  "stopped_idle",
+                  "stopped_by_user",
+                  "error"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "owner_account_id": {
+            "title": "Owner Account Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "spend": {
+            "$ref": "#/components/schemas/Spend"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loop_id",
+          "name",
+          "slug",
+          "agent_id",
+          "owner_account_id",
+          "status",
+          "outcome",
+          "reason",
+          "created_at",
+          "updated_at",
+          "hypothesis",
+          "experiments",
+          "spend",
+          "next_action"
+        ],
+        "title": "LoopListItem",
         "type": "object"
       },
       "LoopNext": {
@@ -636,95 +774,6 @@
           "winner"
         ],
         "title": "LoopReport",
-        "type": "object"
-      },
-      "LoopSummary": {
-        "properties": {
-          "agent_id": {
-            "title": "Agent Id",
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "loop_id": {
-            "title": "Loop Id",
-            "type": "string"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "outcome": {
-            "anyOf": [
-              {
-                "enum": [
-                  "passed",
-                  "already_passing",
-                  "max_runs",
-                  "budget_reached",
-                  "stopped_idle",
-                  "stopped_by_user",
-                  "error"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Outcome"
-          },
-          "owner_account_id": {
-            "title": "Owner Account Id",
-            "type": "string"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reason"
-          },
-          "slug": {
-            "title": "Slug",
-            "type": "string"
-          },
-          "status": {
-            "enum": [
-              "running",
-              "completed",
-              "failed",
-              "cancelled"
-            ],
-            "title": "Status",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loop_id",
-          "name",
-          "slug",
-          "agent_id",
-          "owner_account_id",
-          "status",
-          "outcome",
-          "reason",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "LoopSummary",
         "type": "object"
       },
       "NeedsChange": {
@@ -1566,7 +1615,7 @@
     },
     "/evalve/v1/loops": {
       "get": {
-        "description": "List Loops across the deployment, newest first.",
+        "description": "List Loops across the deployment, newest first.\n\nThe list reads the Loop store only. It makes no Kitaru call apart from the identity check, and\nit does not move a Loop.",
         "operationId": "list_loops_evalve_v1_loops_get",
         "parameters": [
           {
@@ -1608,6 +1657,25 @@
               ],
               "description": "Filter by the Loop owner's Kitaru account ID.",
               "title": "Owner Account Id"
+            }
+          },
+          {
+            "description": "Filter by the Kitaru agent ID of the Loop.",
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by the Kitaru agent ID of the Loop.",
+              "title": "Agent Id"
             }
           },
           {

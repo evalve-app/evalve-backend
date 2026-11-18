@@ -142,6 +142,77 @@ class LoopApiTest(unittest.TestCase):
         self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=AUTH).json()["loop_id"], loop_id)
         self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers={"Cookie": SESSION["Cookie"]}).status_code, 401)
 
+    def test_a_list_item_carries_what_the_dashboard_list_shows(self):
+        loop_id = self.make_loop()
+        detail = f"{LOOPS}/{loop_id}"
+
+        def row(**params):
+            items = self.api.get(LOOPS, headers=TEAM_AUTH, params=params).json()["items"]
+            return next((item for item in items if item["loop_id"] == loop_id), None)
+
+        def agrees_with_status(item):
+            status = self.api.get(detail, headers=TEAM_AUTH).json()
+            self.assertEqual(item["spend"], status["spend"])
+            self.assertEqual(item["experiments"], len(status["experiments"]))
+            self.assertEqual(item["next_action"], (status["next"] or {}).get("action"))
+            self.assertEqual(item["hypothesis"], status["setup"]["hypothesis"])
+            for field in ("loop_id", "name", "slug", "agent_id", "owner_account_id", "status", "outcome", "created_at"):
+                self.assertEqual(item[field], status[field])
+
+        first = row()
+        self.assertEqual((first["hypothesis"], first["experiments"], first["next_action"]), ("Clarify escalation.", 1, "collect"))
+        self.assertEqual(first["spend"], {"recorded_usd": "0", "accounted_usd": "0", "budget_usd": "4"})
+        agrees_with_status(first)
+
+        # A red Control Run: the Loop waits for a change, and the spend has the cost of the Run.
+        self.collect_red(loop_id)
+        waiting = row()
+        self.assertEqual((waiting["next_action"], waiting["spend"]["recorded_usd"]), ("needs_change", "0.15"))
+        agrees_with_status(waiting)
+
+        # A second Experiment.
+        self.assertEqual(self.api.post(f"{detail}/experiments", headers=AUTH, json=PROPOSAL).status_code, 201)
+        second = row()
+        self.assertEqual(second["experiments"], 2)
+        agrees_with_status(second)
+
+        # The agent filter, alone and with the other filters.
+        agent = second["agent_id"]
+        self.assertEqual(row(agent_id=agent)["loop_id"], loop_id)
+        self.assertEqual(row(agent_id=agent, status="running", owner_account_id=ACCOUNT["id"])["loop_id"], loop_id)
+        self.assertIsNone(row(agent_id="another-agent"))
+        self.assertIsNone(row(agent_id=agent, status="completed"))
+        self.assertIsNone(row(agent_id=agent, owner_account_id=TEAMMATE["id"]))
+        self.assertEqual(self.api.get(LOOPS, headers=AUTH, params={"agent_id": ""}).status_code, 422)
+
+        # The list reads the Loop store only: no step ran, and Kitaru got identity checks only.
+        calls = len(self.steps.calls)
+        before = self.store.get_loop(None, loop_id)
+        for _ in range(3):
+            row()
+        self.assertEqual(len(self.steps.calls), calls)
+        self.assertEqual(self.store.get_loop(None, loop_id), before)
+        self.assertEqual({request.url.path for request in self.kitaru.requests}, {"/api/v1/accounts/me"})
+
+        # A Loop at an end state has no next action.
+        self.assertEqual(self.api.post(f"{detail}/cancel", headers=AUTH).status_code, 200)
+        ended = row()
+        self.assertEqual((ended["status"], ended["next_action"]), ("cancelled", None))
+        agrees_with_status(ended)
+
+    def test_the_agent_filter_works_with_the_cursor(self):
+        ids = [self.start(START | {"name": f"Loop {n}"}, key=f"loop-{n}").json()["loop_id"] for n in range(3)]
+        agent = self.api.get(f"{LOOPS}/{ids[0]}", headers=AUTH).json()["agent_id"]
+        seen, cursor = [], None
+        for _ in range(4):
+            params = {"agent_id": agent, "limit": 2} | ({"cursor": cursor} if cursor else {})
+            page = self.api.get(LOOPS, headers=AUTH, params=params).json()
+            seen += [item["loop_id"] for item in page["items"]]
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        self.assertEqual(seen, list(reversed(ids)))
+
     def test_equivalent_start_reuses_existing_loop_before_preflight(self):
         loop_id = self.make_loop()
         same = dict(reversed(list(START.items()))) | {
@@ -355,6 +426,11 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(set(models["LoopDetail"]["properties"]["status"]["enum"]), {"running", "completed", "failed", "cancelled"})
         self.assertIn("passed", models["LoopDetail"]["properties"]["outcome"]["anyOf"][0]["enum"])
         self.assertIn("needs_change", models["LoopNext"]["properties"]["action"]["enum"])
+        item = models["LoopListItem"]["properties"]
+        self.assertLessEqual({"hypothesis", "experiments", "spend", "next_action"}, set(item))
+        self.assertEqual(models["LoopList"]["properties"]["items"]["items"], {"$ref": "#/components/schemas/LoopListItem"})
+        parameters = {p["name"] for p in schema["paths"][LOOPS]["get"]["parameters"]}
+        self.assertLessEqual({"agent_id", "status", "owner_account_id", "cursor", "limit"}, parameters)
 
     def test_each_signed_in_route_declares_both_ways_to_sign_in(self):
         schema = create_app(settings()).openapi()
