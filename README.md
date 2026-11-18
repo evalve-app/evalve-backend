@@ -181,6 +181,8 @@ Regenerate the checked-in OpenAPI contract when a route changes:
 PYTHONPATH=tests .venv/bin/python -c 'import json; from evalve_backend.app import create_app; from helpers import settings; print(json.dumps(create_app(settings()).openapi(), indent=2, sort_keys=True))' > openapi/evalve-backend.json
 ```
 
+Each `v*` release has this file as the asset `openapi.json`. `evalve-ui` generates its typed client of the backend from that asset, so a change to the file is a change to the dashboard's API.
+
 ## Container
 
 ```bash
