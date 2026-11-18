@@ -347,4 +347,12 @@ Do not correct the problem in this check. An observation gets no bug story, unle
 
 The Loops and their Kitaru experiments stay on the Kitaru server and in the Evalve backend. Do not delete them.
 
-Make sure that no Loop of this check is `running`. Call `evalve_loop_list` with `status: running`. Call `evalve_loop_cancel` on each Loop with a name that starts with `sc-345`.
+Make sure that no Loop of this check is `running`:
+
+1. Call `evalve_loop_list` with `status: running`.
+2. Compare each `loop_id` in the list with the `loop_id` values that you recorded in this check.
+3. Call `evalve_loop_cancel` only on a Loop that has a `loop_id` from this check.
+
+Do not cancel a Loop because of its name. A Loop from a different check can also have a name that starts with `sc-345`. A cancel also cancels the Kitaru run of that Loop.
+
+If a start returned no `loop_id` (see "The backend cannot answer now (503)"), find the Loop by its full name, with the date and the sequence number.
