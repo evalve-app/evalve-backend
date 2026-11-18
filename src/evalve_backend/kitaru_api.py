@@ -25,10 +25,17 @@ class KitaruTransient(Exception):
 class KitaruRejected(Exception):
     """Kitaru refused the call. Repeating it gives the same answer."""
 
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, request: str = ""):
         super().__init__(f"Kitaru refused the request (HTTP {status}): {detail}")
         self.status = status
         self.detail = detail
+        # The method and the route template, for example "POST /experiments/{id}/runs". It has no IDs.
+        self.request = request
+
+    def describe(self) -> str:
+        """The text for a Loop's reason, which every account can read."""
+        where = f"{self.request}, " if self.request else ""
+        return f"{where}HTTP {self.status}: {self.detail}"
 
 
 class KitaruNotFound(KitaruRejected):
@@ -48,15 +55,40 @@ def condition(field: str, value: str) -> dict:
     return {"field": field, "op": "eq", "value": value}
 
 
+def _validation_errors(detail: list) -> str:
+    """The field and the message of each validation error that Kitaru (FastAPI) returned for a 422.
+
+    An error object can also hold `input` and `ctx`, which repeat what the caller sent, for example a
+    system prompt. Those never go into the text.
+    """
+    errors = []
+    for item in detail:
+        message = item.get("msg") if isinstance(item, dict) else None
+        if not isinstance(message, str) or not message:
+            continue
+        location = item.get("loc")
+        field = ".".join(str(part) for part in location) if isinstance(location, list) else ""
+        errors.append(f"{field}: {message}" if field else message)
+    return "; ".join(errors)
+
+
 def _detail(response: httpx.Response) -> str:
     try:
         detail = response.json().get("detail")
     except (ValueError, AttributeError):
         detail = None
-    if not isinstance(detail, str):
+    if isinstance(detail, list):
+        detail = _validation_errors(detail)
+    if not isinstance(detail, str) or not detail:
         detail = "no details"
     # The detail can end up in a Loop's reason, which every account can read. Keep it short.
     return detail[:300]
+
+
+def _route(method: str, path: str) -> str:
+    """The method and the route template of a call. Each path segment with a digit is an ID."""
+    segments = path.removeprefix("/api/v1").split("/")
+    return f"{method} " + "/".join("{id}" if any(ch.isdigit() for ch in s) else s for s in segments)
 
 
 class KitaruApi:
@@ -97,11 +129,12 @@ class KitaruApi:
         # of the Loop, so the caller tries again after signing in. 408 and 429 come from a proxy.
         if status >= 500 or status in (401, 403, 408, 429) or (status == 409 and IN_PROGRESS in detail):
             raise KitaruTransient
+        request = _route(method, path)
         if status == 404:
-            raise KitaruNotFound(status, detail)
+            raise KitaruNotFound(status, detail, request)
         if status == 409:
-            raise KitaruConflict(status, detail)
-        raise KitaruRejected(status, detail)
+            raise KitaruConflict(status, detail, request)
+        raise KitaruRejected(status, detail, request)
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
         return await self._send("GET", path, params=params)
