@@ -164,7 +164,7 @@ class SubmitTest(ExecutorTest):
         self.assertEqual(request.headers["idempotency-key"], "evalve-loop-1-exp-0-run-1")
         self.assertEqual(request.content, (
             b'{"agent_version_id":"agent-version-2","baseline_evaluation_mode":"none",'
-            b'"cohort_version_id":"6f1c2c4e-8f4b-4a57-9a51-3c0e2a1d5b10","evaluate_baselines":false}'))
+            b'"cohort_version_id":"6f1c2c4e-8f4b-4a57-9a51-3c0e2a1d5b10"}'))
 
     async def test_a_lost_submit_reply_is_recovered_with_the_same_key(self):
         spec = self.run_spec()
