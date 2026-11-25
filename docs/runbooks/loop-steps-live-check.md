@@ -63,8 +63,13 @@ From the `evalve-backend` checkout, on the branch `jack/sc-268/loop-steps`:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e .
+EVALVE_DB_HOST=localhost EVALVE_DB_SSL_MODE=disable \
+EVALVE_DB_ADMIN_USER=postgres EVALVE_DB_ADMIN_PWD=postgres \
+EVALVE_DB_USER=evalve EVALVE_DB_PWD=evalve-local-password \
+EVALVE_DB_NAME=evalve_live_check \
+.venv/bin/python -m evalve_backend setup-database
 EVALVE_KITARU_URL=$KITARU_URL \
-EVALVE_DB_HOST=localhost EVALVE_DB_USER=postgres EVALVE_DB_PWD=postgres EVALVE_DB_SSL_MODE=disable \
+EVALVE_DB_HOST=localhost EVALVE_DB_USER=evalve EVALVE_DB_PWD=evalve-local-password EVALVE_DB_SSL_MODE=disable \
 EVALVE_DB_NAME=evalve_live_check \
 .venv/bin/python -m evalve_backend
 ```

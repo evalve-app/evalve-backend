@@ -1,8 +1,11 @@
 """Shared pieces for the tests: settings, and a fake Kitaru server."""
 
 import httpx
+import psycopg
 from fastapi.testclient import TestClient
+from psycopg import sql
 
+from evalve_backend import database
 from evalve_backend.app import create_app
 from evalve_backend.settings import Settings
 
@@ -20,6 +23,13 @@ def settings(**overrides) -> Settings:
         "db_password": "database-password-value", "db_ssl_ca": "/run/rds-ca.pem",
     }
     return Settings(**(values | overrides))
+
+
+def create_database(settings: Settings) -> None:
+    """Make a test database. In a deployment, the setup-database command does this."""
+    options = database.connection_options(settings, database.MAINTENANCE_DATABASE)
+    with psycopg.connect(**options, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(settings.db_name)))
 
 
 class FakeKitaru:
