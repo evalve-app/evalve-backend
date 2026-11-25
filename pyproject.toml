@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "evalve-backend"
-version = "0.2.2"
+version = "0.3.0"
 description = "Stores Evalve loop data next to a Kitaru server"
 readme = "README.md"
 requires-python = ">=3.11"
