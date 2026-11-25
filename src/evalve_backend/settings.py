@@ -63,18 +63,18 @@ class Settings:
             db_host=env["EVALVE_DB_HOST"].strip(),
             db_user=env["EVALVE_DB_USER"].strip(),
             db_password=env["EVALVE_DB_PWD"],
-            db_port=_port(env, "EVALVE_DB_PORT", 5432),
+            db_port=port_setting(env, "EVALVE_DB_PORT", 5432),
             db_name=db_name,
             db_ssl_mode=env.get("EVALVE_DB_SSL_MODE", "verify-full"),
             db_ssl_ca=env.get("EVALVE_DB_SSL_CA") or None,
             host=env.get("EVALVE_HOST", "127.0.0.1"),
-            port=_port(env, "EVALVE_PORT", 8100),
+            port=port_setting(env, "EVALVE_PORT", 8100),
             image=env.get("EVALVE_IMAGE") or None,
             session_cookie_name=cookie_name,
         )
 
 
-def _port(env: Mapping[str, str], name: str, default: int) -> int:
+def port_setting(env: Mapping[str, str], name: str, default: int) -> int:
     value = env.get(name, str(default))
     if not value.isdecimal() or not 1 <= int(value) <= 65535:
         raise SettingsError(f"{name} must be a port number.")

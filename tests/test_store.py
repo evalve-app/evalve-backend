@@ -17,7 +17,7 @@ from psycopg.errors import CheckViolation
 from evalve_backend import database, loop_rules, migrations
 from evalve_backend.__main__ import main
 from evalve_backend.store import LoopStart, PostgresStore, RunPlan, StartResult
-from helpers import settings
+from helpers import create_database, settings
 from memory_store import MemoryStore
 
 OWNER = "account-1"
@@ -219,7 +219,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
             db_ssl_mode="disable", db_ssl_ca=None,
         )
         self.addCleanup(self.drop_database)
-        database.ensure_database(self.settings)
+        create_database(self.settings)
         migrations.migrate(self.settings)
         self.store = PostgresStore(self.settings)
 
@@ -314,7 +314,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
 
     def test_migrations_serialize_and_preserve_pilot_table(self):
         self.drop_database()
-        database.ensure_database(self.settings)
+        create_database(self.settings)
         with self.connect() as connection:
             connection.execute("CREATE TABLE evalve_loops (slug text PRIMARY KEY)")
             connection.execute("INSERT INTO evalve_loops VALUES ('pilot')")
@@ -327,7 +327,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
 
     def test_upgrade_indexes_existing_loops_across_owners(self):
         self.drop_database()
-        database.ensure_database(self.settings)
+        create_database(self.settings)
         with patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS[:1]):
             self.assertEqual(migrations.migrate(self.settings), (1,))
         loop_id = self.start()
@@ -346,6 +346,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
 
     def test_migration_failure_rolls_back_schema_and_stops_startup(self):
         self.drop_database()
+        create_database(self.settings)
         with patch("evalve_backend.__main__.Settings.from_environment", return_value=self.settings):
             next_version = migrations.MIGRATIONS[-1][0] + 1
             broken = migrations.MIGRATIONS + ((next_version, "CREATE TABLE broken"),)

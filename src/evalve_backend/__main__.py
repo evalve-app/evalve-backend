@@ -1,4 +1,7 @@
-"""Start the backend: check settings, prepare the database schema, then serve."""
+"""Start the backend: check settings, prepare the database schema, then serve.
+
+`python -m evalve_backend setup-database` runs the database setup step instead.
+"""
 
 import logging
 import os
@@ -8,7 +11,7 @@ import time
 import psycopg
 import uvicorn
 
-from evalve_backend import database
+from evalve_backend import database, setup_database
 from evalve_backend.app import create_app
 from evalve_backend.migrations import migrate
 from evalve_backend.settings import Settings, SettingsError
@@ -17,12 +20,11 @@ logger = logging.getLogger("evalve_backend")
 
 
 def wait_for_database(settings: Settings, timeout: float, sleep=time.sleep, clock=time.monotonic) -> None:
-    """Create the database if needed, retrying while the server is still coming up."""
+    """Connect to the database, retrying while the server is still coming up."""
     deadline = clock() + timeout
     while True:
         try:
-            if database.ensure_database(settings):
-                logger.info("Created the %s database.", settings.db_name)
+            database.check_connection(settings)
             return
         except psycopg.Error as error:
             if clock() >= deadline:
@@ -35,6 +37,8 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # httpx logs each request line at INFO. Keep sign-in checks out of the logs.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    if sys.argv[1:] == ["setup-database"]:
+        return setup_database.run()
     try:
         settings = Settings.from_environment()
         timeout = float(os.environ.get("EVALVE_DB_WAIT_SECONDS", "120"))
