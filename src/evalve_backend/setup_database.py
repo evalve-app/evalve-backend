@@ -260,8 +260,8 @@ def ensure_password(settings: SetupSettings, connect=psycopg.connect) -> list[st
 
     The secret is the source of truth. If the role can log in with it, nothing
     changes. If not (no password yet, a new value in the secret, or an old one
-    from a restore), PostgreSQL gets the secret's password. Returns what this
-    call changed.
+    from a restore), PostgreSQL gets the secret's password, and the role must
+    then log in. Returns what this call changed.
     """
     role_login = connection_options(settings, settings.db_name, settings.role_name, settings.role_password)
     try:
@@ -277,6 +277,13 @@ def ensure_password(settings: SetupSettings, connect=psycopg.connect) -> list[st
                 sql.Identifier(settings.role_name), sql.Literal(scram_password(settings.role_password))
             )
         )
+    # Something other than the password can block the login, such as an
+    # expired password or a server rule. Then the backend could not start either.
+    try:
+        with connect(**role_login):
+            pass
+    except psycopg.OperationalError:
+        raise SetupError("the role still cannot log in after its password was set") from None
     return ["set the password of the role"]
 
 

@@ -156,7 +156,7 @@ It reads the backend's database settings, plus:
 
 ## Run it locally
 
-You need Python 3.11 or newer, a PostgreSQL server, and a Kitaru server.
+You need Python 3.11 or newer, PostgreSQL 16 or newer, and a Kitaru server.
 
 ```bash
 python3 -m venv .venv

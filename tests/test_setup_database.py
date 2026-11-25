@@ -391,6 +391,17 @@ class RealDatabaseTest(unittest.TestCase):
         with self.assertRaisesRegex(psycopg.OperationalError, "password authentication failed"):
             self.connect_as_role(self.settings.db_name).close()
 
+    def test_a_login_still_blocked_after_the_password_change_stops_the_step(self):
+        with self.admin() as connection:
+            ensure_role(connection, self.settings)
+            ensure_database(connection, self.settings)
+            # Setting a new password keeps this expiry date, so the login still fails.
+            connection.execute(
+                sql.SQL("ALTER ROLE {} VALID UNTIL '2000-01-01'").format(sql.Identifier(self.settings.role_name))
+            )
+        with self.assertRaisesRegex(SetupError, "still cannot log in"):
+            ensure_password(self.settings)
+
     def test_the_command_sets_everything_up_then_changes_nothing(self):
         self.create_kitaru_database()
         stdout = io.StringIO()
