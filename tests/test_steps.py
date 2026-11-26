@@ -4,6 +4,7 @@ Each test drives a Loop the way the Evalve MCP does: start it, poll its status, 
 Between calls the test plays the Kitaru workers by finishing runs in the fake.
 """
 
+import copy
 import json
 import logging
 import unittest
@@ -19,6 +20,10 @@ from memory_store import MemoryStore
 LOOPS = "/evalve/v1/loops"
 OWNER = {"Authorization": f"Bearer {TOKEN}"}
 TEAMMATE = {"Authorization": "Bearer teammate-token"}
+# The dashboard session of the Loop owner.
+SESSION = {"Cookie": "evalve_session=session-token-value", "X-CSRF-Token": "csrf-token-value"}
+ONLY_BEARER = {"detail": "Only a Bearer credential can start a Run. Use the Evalve MCP."}
+ME = "/api/v1/accounts/me"
 RUNS = r"/api/v1/experiments/[^/]+/runs"
 START = {
     "name": "Support loop", "cohort_version_id": COHORT_VERSION_ID,
@@ -34,6 +39,8 @@ class StepsTest(unittest.TestCase):
     def setUp(self):
         self.kitaru = FakeKitaru(OWNER["Authorization"])
         self.kitaru.accounts[TEAMMATE["Authorization"]] = {"id": "account-2", "name": "teammate", "active": True}
+        owner = self.kitaru.accounts[OWNER["Authorization"]]
+        self.kitaru.dashboard_sessions[SESSION["Cookie"], SESSION["X-CSRF-Token"]] = owner
         self.store = MemoryStore()
         self.api = self.enterContext(client(self.kitaru, store=self.store))
 
@@ -79,6 +86,107 @@ class StepsTest(unittest.TestCase):
     def end(self, loop_id) -> tuple:
         loop = self.stored(loop_id)
         return loop["status"], loop["outcome"]
+
+
+class DriveAndRefreshTest(StepsTest):
+    """Only a Bearer credential of the Loop owner drives a Loop. A dashboard session refreshes it."""
+
+    def kitaru_calls_since(self, mark: int) -> set[str]:
+        return {request.url.path for request in self.kitaru.requests[mark:]}
+
+    def test_a_dashboard_session_cannot_start_a_loop(self):
+        reply = self.api.post(LOOPS, headers=SESSION | {"Idempotency-Key": "start"}, json=START)
+        self.assertEqual((reply.status_code, reply.json()), (403, ONLY_BEARER))
+        self.assertEqual(self.kitaru_calls_since(0), {ME})
+        self.assertEqual(self.store.list_loops(None), [])
+
+    def test_a_dashboard_session_cannot_propose_an_experiment(self):
+        loop_id = self.started()
+        self.finish("red")
+        self.status(loop_id)
+        before, mark = copy.deepcopy(self.stored(loop_id)), len(self.kitaru.requests)
+        reply = self.api.post(f"{LOOPS}/{loop_id}/experiments", headers=SESSION, json=CHANGE)
+        self.assertEqual((reply.status_code, reply.json()), (403, ONLY_BEARER))
+        self.assertEqual(self.kitaru_calls_since(mark), {ME})
+        self.assertEqual(self.stored(loop_id), before)
+        # The same change with a Bearer credential starts Experiment 1, as before.
+        self.assertEqual(self.propose(loop_id).status_code, 201)
+        self.assertEqual(len(self.kitaru.runs), 2)
+
+    def test_a_refresh_records_a_finished_run_and_the_next_drive_starts_run_2(self):
+        loop_id = self.started(required_consecutive_greens=3)
+        self.finish("green")
+        detail = self.status(loop_id, SESSION)
+        self.assertEqual((detail["status"], detail["next"]["action"]), ("running", "replay"))
+        self.assertEqual(self.outcomes(loop_id), [["green"]])
+        self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
+        # A second refresh has nothing to record, and it starts nothing.
+        self.assertEqual(self.status(loop_id, SESSION)["next"]["action"], "replay")
+        self.assertEqual(self.outcomes(loop_id), [["green"]])
+        self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
+        # The Loop waits for a driving call.
+        self.assertEqual(self.status(loop_id)["next"]["action"], "collect")
+        self.assertEqual(self.outcomes(loop_id), [["green", None]])
+        self.assertEqual(len(self.kitaru.runs), 2)
+
+    def test_a_refresh_of_a_run_that_is_not_finished_changes_nothing(self):
+        loop_id = self.started()
+        before = copy.deepcopy(self.stored(loop_id))
+        self.assertEqual(self.status(loop_id, SESSION)["next"]["action"], "collect")
+        self.assertEqual(self.stored(loop_id), before)
+
+    def test_a_refresh_ends_a_loop_whose_last_result_makes_it_pass(self):
+        loop_id = self.started()
+        self.finish("red")
+        self.status(loop_id)
+        self.assertEqual(self.propose(loop_id).status_code, 201)
+        self.finish("green")
+        self.status(loop_id)
+        self.finish("green")
+        detail = self.status(loop_id, SESSION)
+        self.assertEqual((detail["status"], detail["outcome"]), ("completed", "passed"))
+        self.assertEqual(self.outcomes(loop_id), [["red"], ["green", "green"]])
+        self.assertEqual(self.published(loop_id)["status"], "stop_success")
+
+    def test_a_refresh_does_not_send_a_start_that_never_reached_kitaru(self):
+        self.kitaru.fail("POST", RUNS, 503)
+        self.assertEqual(self.start().status_code, 503)
+        (loop_id,) = self.store._loops
+        self.assertEqual(self.status(loop_id, SESSION)["next"]["action"], "resume_start")
+        self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
+        self.assertEqual(self.kitaru.runs, {})
+        self.status(loop_id)
+        self.assertEqual(len(self.kitaru.runs), 1)
+
+    def test_a_refresh_does_not_retry_an_incomplete_run(self):
+        loop_id = self.started()
+        self.finish("incomplete")
+        for _ in range(2):
+            self.assertEqual(self.status(loop_id, SESSION)["next"]["action"], "retry")
+        self.assertEqual(self.outcomes(loop_id), [["incomplete"]])
+        self.assertEqual(len(self.kitaru.requests_to("POST", RUNS)), 1)
+        self.status(loop_id)
+        self.assertEqual(self.outcomes(loop_id), [["incomplete", None]])
+
+    def test_a_refresh_after_the_wait_limit_ends_the_loop_as_stopped_idle(self):
+        loop_id = self.started()
+        self.finish("red")
+        self.assertEqual(self.status(loop_id, SESSION)["next"]["action"], "needs_change")
+        self.store._loops[loop_id]["waiting_since"] -= timedelta(hours=25)
+        detail = self.status(loop_id, SESSION)
+        self.assertEqual((detail["status"], detail["outcome"]), ("completed", "stopped_idle"))
+
+    def test_a_dashboard_session_cancels_a_loop_and_its_run(self):
+        loop_id = self.started()
+        reply = self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=SESSION)
+        self.assertEqual((reply.status_code, reply.json()["status"]), (200, "cancelled"))
+        self.assertEqual(self.kitaru.runs[self.latest_run()]["status"], "canceled")
+
+    def test_a_request_with_an_authorization_header_and_the_session_cookie_drives(self):
+        loop_id = self.started(required_consecutive_greens=3)
+        self.finish("green")
+        self.status(loop_id, OWNER | SESSION)
+        self.assertEqual(self.outcomes(loop_id), [["green", None]])
 
 
 class PassingTest(StepsTest):

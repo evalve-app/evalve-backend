@@ -95,6 +95,10 @@ class FakeSteps:
         authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("advance", owner, authorization))
 
+    async def refresh(self, owner, loop_id, credential):
+        authorization = credential.headers.get("Authorization") or dict(credential.headers)
+        self.calls.append(("refresh", owner, authorization))
+
     async def cancel(self, owner, loop_id, credential):
         authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("cancel", owner, authorization))
@@ -129,18 +133,44 @@ class LoopApiTest(unittest.TestCase):
             ACCOUNT["id"], loop_id, 0, 1, result, datetime.now(timezone.utc) - age, needs_change=True,
         ))
 
-    def test_a_dashboard_session_runs_a_loop_with_its_cookie_and_csrf_token(self):
-        response = self.start(headers=SESSION)
-        self.assertEqual(response.status_code, 201, response.text)
-        loop_id = response.json()["loop_id"]
+    def test_a_dashboard_session_refreshes_and_cancels_a_loop_with_its_cookie_and_csrf_token(self):
+        loop_id = self.make_loop()
         self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=SESSION).status_code, 200)
         self.assertEqual(self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=SESSION).status_code, 200)
-        self.assertEqual([call[0] for call in self.steps.calls], ["preflight", "submit", "advance", "cancel"])
+        self.assertEqual([call[0] for call in self.steps.calls], ["preflight", "submit", "refresh", "cancel"])
         # Each step gets the session as it arrived, so its Kitaru calls pass the CSRF check too.
-        self.assertTrue(all(call[2] == SESSION for call in self.steps.calls), self.steps.calls)
-        # The same account with a key sees the same Loop: no route treats the two differently.
-        self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=AUTH).json()["loop_id"], loop_id)
+        self.assertTrue(all(call[2] == SESSION for call in self.steps.calls[2:]), self.steps.calls)
         self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers={"Cookie": SESSION["Cookie"]}).status_code, 401)
+
+    def test_a_dashboard_session_starts_no_run(self):
+        refusal = {"detail": "Only a Bearer credential can start a Run. Use the Evalve MCP."}
+        first = self.start(headers=SESSION)
+        self.assertEqual((first.status_code, first.json()), (403, refusal))
+        self.assertEqual((self.steps.calls, self.store.list_loops(None)), ([], []))
+        # A repeat of a start that a Bearer credential made is refused too.
+        loop_id = self.make_loop()
+        self.assertEqual(self.start(headers=SESSION).status_code, 403)
+        # A late proposal does not apply the wait limit: the refusal changes nothing in the store.
+        self.collect_red(loop_id, age=timedelta(hours=25))
+        before = self.store.get_loop(None, loop_id)
+        proposal = self.api.post(f"{LOOPS}/{loop_id}/experiments", headers=SESSION, json=PROPOSAL)
+        self.assertEqual((proposal.status_code, proposal.json()), (403, refusal))
+        self.assertEqual(self.store.get_loop(None, loop_id), before)
+        self.assertEqual([call[0] for call in self.steps.calls], ["preflight", "submit"])
+        self.assertEqual({request.url.path for request in self.kitaru.requests}, {"/api/v1/accounts/me"})
+
+    def test_the_authorization_header_decides_the_type_of_the_credential(self):
+        loop_id = self.make_loop()
+        # With the header and the cookie, the credential is a Bearer credential: the call drives the Loop.
+        self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=AUTH | SESSION).status_code, 200)
+        self.assertEqual(self.steps.calls[-1], ("advance", ACCOUNT["id"], AUTH["Authorization"]))
+        self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=SESSION).status_code, 200)
+        self.assertEqual(self.steps.calls[-1], ("refresh", ACCOUNT["id"], SESSION))
+
+    def test_a_dashboard_session_applies_the_wait_limit(self):
+        loop_id = self.make_loop()
+        self.collect_red(loop_id, age=timedelta(hours=25))
+        self.assertEqual(self.api.get(f"{LOOPS}/{loop_id}", headers=SESSION).json()["outcome"], "stopped_idle")
 
     def test_a_list_item_carries_what_the_dashboard_list_shows(self):
         loop_id = self.make_loop()
@@ -426,6 +456,11 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(set(models["LoopDetail"]["properties"]["status"]["enum"]), {"running", "completed", "failed", "cancelled"})
         self.assertIn("passed", models["LoopDetail"]["properties"]["outcome"]["anyOf"][0]["enum"])
         self.assertIn("needs_change", models["LoopNext"]["properties"]["action"]["enum"])
+        # The two routes that start a Run refuse a dashboard session.
+        for path in (LOOPS, f"{LOOPS}/{{loop_id}}/experiments"):
+            self.assertIn("403", schema["paths"][path]["post"]["responses"], path)
+        status = schema["paths"][f"{LOOPS}/{{loop_id}}"]["get"]["description"]
+        self.assertTrue("drive" in status and "refresh" in status, status)
         item = models["LoopListItem"]["properties"]
         self.assertLessEqual({"hypothesis", "experiments", "spend", "next_action"}, set(item))
         self.assertEqual(models["LoopList"]["properties"]["items"]["items"], {"$ref": "#/components/schemas/LoopListItem"})

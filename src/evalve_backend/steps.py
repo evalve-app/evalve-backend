@@ -1,8 +1,10 @@
-"""The Loop steps: the backend moves a Loop forward only when the Loop owner's agent calls it.
+"""The Loop steps: the backend moves a Loop only when the Loop owner calls it.
 
 There is no background task and no Kitaru key of the backend's own. Each call holds the Loop's lock,
-does at most one step with the caller's key, and writes each fact to the store before the Kitaru
+does at most one step with the caller's credential, and writes each fact to the store before the Kitaru
 call that depends on it. The rules come from `loop_rules`; this module applies them.
+
+A drive (`advance`) starts a Run. A refresh records a finished Run or an end state and starts no Run.
 """
 
 from __future__ import annotations
@@ -62,6 +64,9 @@ class KitaruLoopSteps:
     async def advance(self, owner: str, loop_id: str, credential: Credential) -> None:
         await self._locked(owner, loop_id, credential, lambda step: step.advance())
 
+    async def refresh(self, owner: str, loop_id: str, credential: Credential) -> None:
+        await self._locked(owner, loop_id, credential, lambda step: step.refresh())
+
     async def cancel(self, owner: str, loop_id: str, credential: Credential) -> None:
         await self._locked(owner, loop_id, credential, lambda step: step.cancel())
 
@@ -111,28 +116,43 @@ class _Step:
     def decide(self) -> dict:
         return loop_rules.decide(self.config, self.state(), self.now, self.loop["waiting_since"])
 
-    # The three operations.
+    # The four operations.
 
     async def submit_pending(self, number: int) -> None:
         if await self.load():
             await self.submit(number)
 
-    async def advance(self) -> None:
+    async def refresh(self) -> None:
+        """Record a finished Run and apply an end state. It starts no Run."""
+        await self.settle()
+
+    async def settle(self) -> dict | None:
+        """The part that a refresh and a drive share: collect a finished Run and apply an end state.
+
+        Returns the decision that is left for a drive, or None when the Loop has nothing to start now.
+        """
         if not await self.load():
-            return
+            return None
         decision = self.decide()
         if decision["action"] == "collect":
             # Ask Kitaru one time. A Run that is still going is collected by a later call.
             if not await self.collect() or not await self.load():
-                return
+                return None
             decision = self.decide()
-        action = decision["action"]
-        if action == "resume_start":
+        if decision["action"].startswith("stop_"):
+            await self.end(decision["action"], decision.get("reason"), decision.get("experiment"))
+            return None
+        return decision
+
+    async def advance(self) -> None:
+        """Drive the Loop: do what a refresh does, then start the Run that the rules ask for."""
+        decision = await self.settle()
+        if decision is None:
+            return
+        if decision["action"] == "resume_start":
             await self.submit(decision["experiment"])
-        elif action in ("replay", "retry"):
+        elif decision["action"] in ("replay", "retry"):
             await self.next_run()
-        elif action.startswith("stop_"):
-            await self.end(action, decision.get("reason"), decision.get("experiment"))
 
     async def cancel(self) -> None:
         if not await self.load():

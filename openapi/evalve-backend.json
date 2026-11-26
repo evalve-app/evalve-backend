@@ -1849,7 +1849,7 @@
         ]
       },
       "post": {
-        "description": "Validate setup and start the Control Experiment. Repeat safely with the same key.",
+        "description": "Validate setup and start the Control Experiment. Repeat safely with the same key.\n\nOnly a Bearer credential can start a Run. A dashboard session gets 403.",
         "operationId": "start_loop_evalve_v1_loops_post",
         "parameters": [
           {
@@ -1905,6 +1905,16 @@
             },
             "description": "Unauthorized"
           },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "409": {
             "content": {
               "application/json": {
@@ -1953,7 +1963,7 @@
     },
     "/evalve/v1/loops/{loop_id}": {
       "get": {
-        "description": "Read saved status. The owner can also advance a running Loop.",
+        "description": "Read saved status. A call from the Loop owner also moves a running Loop.\n\nWith a Bearer credential, the call can drive the Loop: it records a finished Run and starts the\nnext Run. With a dashboard session, the call can only refresh the Loop: it records a finished Run\nand applies an end state, and it starts no Run. After a refresh, `next.action` can be\n`start_control`, `resume_start`, `replay` or `retry`: the Loop waits for a call that drives it.\nThe wait limit applies to the two types of credential.",
         "operationId": "loop_status_evalve_v1_loops__loop_id__get",
         "parameters": [
           {
@@ -2117,7 +2127,7 @@
     },
     "/evalve/v1/loops/{loop_id}/experiments": {
       "post": {
-        "description": "Accept one proposed change and start the Experiment's first Run.",
+        "description": "Accept one proposed change and start the Experiment's first Run.\n\nOnly a Bearer credential can start a Run. A dashboard session gets 403.",
         "operationId": "propose_experiment_evalve_v1_loops__loop_id__experiments_post",
         "parameters": [
           {
@@ -2160,6 +2170,16 @@
               }
             },
             "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
