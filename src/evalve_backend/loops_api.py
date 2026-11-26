@@ -131,11 +131,27 @@ def _setup(body: models.StartLoop) -> dict:
         cfg = loop_rules.validate_config(cfg)
     except loop_rules.ConfigError as error:
         raise HTTPException(422, str(error)) from None
-    policies = [cfg["tool_policy"]["default"], *cfg["tool_policy"]["tools"].values()]
+    policies = [("default", cfg["tool_policy"]["default"]), *cfg["tool_policy"]["tools"].items()]
     if cfg["allow_live_tools"] or any(
-        policy["type"] == "passthrough" or policy.get("on_miss") == "passthrough" for policy in policies
+        policy["type"] == "passthrough" or policy.get("on_miss") == "passthrough" for _tool, policy in policies
     ):
         raise HTTPException(422, "Live tools are disabled for Loops in v1.")
+    # An allow-list: a Loop also refuses a type or a scope that a later Kitaru version adds.
+    for tool, policy in policies:
+        if policy["type"] not in ("static", "history"):
+            raise HTTPException(
+                422,
+                f"A Loop does not permit a tool policy of the type `{policy['type']}`. "
+                "The permitted types are `static` and `history`.",
+            )
+        scope = policy.get("scope")
+        if policy["type"] == "history" and scope != "baseline":
+            found = "no scope" if scope is None else f"the scope `{scope}`"
+            raise HTTPException(
+                422,
+                "A Loop permits a `history` tool policy only with the scope `baseline`. "
+                f"The policy for `{tool}` has {found}.",
+            )
     return cfg
 
 

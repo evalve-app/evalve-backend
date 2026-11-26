@@ -28,7 +28,7 @@ RUNS = r"/api/v1/experiments/[^/]+/runs"
 START = {
     "name": "Support loop", "cohort_version_id": COHORT_VERSION_ID,
     "evaluators": [{"ref": "policy@1", "params": {"strict": True}}],
-    "tool_policy": {"default": {"type": "replay"}}, "allowed_changes": ["system_prompt", "model"],
+    "tool_policy": {"default": {"type": "history", "scope": "baseline", "on_miss": "fail"}}, "allowed_changes": ["system_prompt", "model"],
     "allowed_models": ["gpt-large"], "required_consecutive_greens": 2, "max_runs": 6, "budget_usd": "2.00",
     "control_prompt": "Answer the customer.",
 }

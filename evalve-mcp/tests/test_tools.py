@@ -121,6 +121,35 @@ class ToolsTest(unittest.IsolatedAsyncioTestCase):
             for words in ("every minute", "needs_change", "24 hours", "stopped_idle", "already_passing"):
                 self.assertIn(words, tools[name].description)
 
+    async def test_the_start_schema_gives_the_tool_policies_that_a_loop_permits(self):
+        async with session(FakeBackend()) as client:
+            tools = {tool.name: tool.inputSchema for tool in (await client.list_tools()).tools}
+        models = tools["evalve_loop_start"]["$defs"]
+        policy = models["ReplayPolicy"]["properties"]
+        self.assertEqual(policy["type"]["description"], "`static` or `history`. A Loop refuses `passthrough` and `llm`.")
+        self.assertEqual(
+            policy["scope"]["description"],
+            "Necessary for `history`, and it must be `baseline`: a Replay reads only the tool results of the "
+            "session that it replays. A Loop refuses `cohort_version` and `agent`.",
+        )
+        self.assertEqual(
+            policy["on_miss"]["description"],
+            "What a `history` lookup does when no recorded result matches: `fail` or `error_result`. "
+            "With `fail`, the Replay stops and the Run is incomplete. Two incomplete Runs in a row end the Loop. "
+            "With `error_result`, the agent gets a tool error and the Loop continues.",
+        )
+        self.assertEqual(
+            models["ToolPolicy"]["properties"]["tools"]["description"],
+            "The replay policy for one tool, by the name of the tool.",
+        )
+
+    async def test_start_sends_the_scope_of_a_tool_policy(self):
+        fake = FakeBackend(answer(201))
+        policy = {"default": {"type": "history", "scope": "baseline", "on_miss": "fail"}, "tools": {"write": {"type": "static"}}}
+        async with session(fake) as client:
+            await client.call_tool("evalve_loop_start", START | {"tool_policy": policy})
+        self.assertEqual(json.loads(fake.requests[0].content)["tool_policy"], policy)
+
     async def test_the_key_is_in_no_log_and_in_no_result(self):
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)

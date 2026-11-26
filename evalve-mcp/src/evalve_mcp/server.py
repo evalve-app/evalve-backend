@@ -37,15 +37,31 @@ class Evaluator(BaseModel):
 class ReplayPolicy(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    type: str
-    on_miss: str | None = None
+    type: str = Field(description="`static` or `history`. A Loop refuses `passthrough` and `llm`.")
+    scope: str | None = Field(
+        default=None,
+        description=(
+            "Necessary for `history`, and it must be `baseline`: a Replay reads only the tool results of the "
+            "session that it replays. A Loop refuses `cohort_version` and `agent`."
+        ),
+    )
+    on_miss: str | None = Field(
+        default=None,
+        description=(
+            "What a `history` lookup does when no recorded result matches: `fail` or `error_result`. "
+            "With `fail`, the Replay stops and the Run is incomplete. Two incomplete Runs in a row end the Loop. "
+            "With `error_result`, the agent gets a tool error and the Loop continues."
+        ),
+    )
 
 
 class ToolPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     default: ReplayPolicy = Field(description="The replay policy for each tool that `tools` does not name.")
-    tools: dict[str, ReplayPolicy] | None = None
+    tools: dict[str, ReplayPolicy] | None = Field(
+        default=None, description="The replay policy for one tool, by the name of the tool.",
+    )
 
 
 def _body(**fields: Any) -> dict:
