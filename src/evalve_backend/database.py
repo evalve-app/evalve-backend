@@ -10,7 +10,7 @@ from contextlib import closing
 from time import monotonic
 
 import psycopg
-from psycopg import pq, sql
+from psycopg import pq
 
 from evalve_backend.settings import Settings
 
@@ -36,24 +36,14 @@ def connection_options(settings: Settings, database: str) -> dict:
     return options
 
 
-def ensure_database(settings: Settings, connect=psycopg.connect) -> bool:
-    """Create the backend's database if the server does not have it yet.
+def check_connection(settings: Settings, connect=psycopg.connect) -> None:
+    """Connect to the backend's database once, and raise when that fails.
 
-    Returns True when this call created it. A database restored from a snapshot
-    already exists, so this leaves it alone.
+    The backend does not make its database. The setup-database command does,
+    with the master user, before the backend starts.
     """
-    with connect(**connection_options(settings, MAINTENANCE_DATABASE), autocommit=True) as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM pg_database WHERE datname = %s", (settings.db_name,)
-        ).fetchone()
-        if exists:
-            return False
-        try:
-            connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(settings.db_name)))
-        except psycopg.errors.DuplicateDatabase:
-            # Another process created it between the check and the create.
-            return False
-        return True
+    with connect(**connection_options(settings, settings.db_name)):
+        pass
 
 
 def ping(settings: Settings, connect=psycopg.connect) -> bool:

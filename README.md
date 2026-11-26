@@ -144,10 +144,10 @@ Read from the environment when the process starts.
 | --- | --- | --- | --- |
 | `EVALVE_KITARU_URL` | Yes | | The deployment's Kitaru server, for example `http://127.0.0.1:8000` |
 | `EVALVE_DB_HOST` | Yes | | PostgreSQL host |
-| `EVALVE_DB_USER` | Yes | | PostgreSQL user. It must be allowed to create a database |
+| `EVALVE_DB_USER` | Yes | | The backend's own PostgreSQL role. It owns `EVALVE_DB_NAME` and needs no other rights. See [Database setup](#database-setup) |
 | `EVALVE_DB_PWD` | Yes | | PostgreSQL password |
 | `EVALVE_DB_PORT` | No | `5432` | |
-| `EVALVE_DB_NAME` | No | `evalve` | The backend's own database. Created at startup if missing |
+| `EVALVE_DB_NAME` | No | `evalve` | The backend's own database. The `setup-database` command creates it; the backend does not |
 | `EVALVE_DB_SSL_MODE` | No | `verify-full` | Use `disable` for a local PostgreSQL without TLS |
 | `EVALVE_DB_SSL_CA` | No | | Path to the CA bundle, for example the RDS bundle |
 | `EVALVE_HOST` | No | `127.0.0.1` | Address to listen on |
@@ -156,19 +156,44 @@ Read from the environment when the process starts.
 | `EVALVE_IMAGE` | No | | The image reference this container was started from. The health route reports it |
 | `EVALVE_SESSION_COOKIE_NAME` | No | `evalve_session` | The name of Kitaru's dashboard session cookie. It must be the same as `KITARU_SERVER_AUTH_COOKIE_NAME`. An empty value turns cookie sign-in off |
 
+## Database setup
+
+`python -m evalve_backend setup-database` gives the backend its own role and database. Run it with a user that can create databases and roles, such as the master user on RDS, before the backend starts. A second run changes nothing. Why and what it does: ADR 0005 in `evalve-deploy`.
+
+It reads the backend's database settings, plus:
+
+| Variable | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `EVALVE_DB_ADMIN_USER` | Yes | | The user that sets up the role and the database |
+| `EVALVE_DB_ADMIN_PWD` | Yes | | Its password |
+| `EVALVE_KITARU_DB_NAME` | No | `kitaru` | Kitaru's database, which the role must not reach |
+
+`EVALVE_DB_PWD` may hold only letters, digits, `-` and `_`. The command exits with `0` when the backend can start, `1` on a database error, and `2` on a bad setting.
+
 ## Run it locally
 
-You need Python 3.11 or newer, a PostgreSQL server, and a Kitaru server.
+You need Python 3.11 or newer, PostgreSQL 16 or newer, and a Kitaru server.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
+Set up the role and the database once, with your PostgreSQL superuser as the admin:
+
+```bash
+EVALVE_DB_HOST=localhost EVALVE_DB_SSL_MODE=disable \
+EVALVE_DB_ADMIN_USER=postgres EVALVE_DB_ADMIN_PWD=postgres \
+EVALVE_DB_USER=evalve EVALVE_DB_PWD=evalve-local-password \
+.venv/bin/python -m evalve_backend setup-database
+```
+
+Then start the backend with the role:
+
 ```bash
 EVALVE_KITARU_URL=http://localhost:8000 \
-EVALVE_DB_HOST=localhost EVALVE_DB_USER=postgres EVALVE_DB_PWD=postgres \
-EVALVE_DB_SSL_MODE=disable \
+EVALVE_DB_HOST=localhost EVALVE_DB_SSL_MODE=disable \
+EVALVE_DB_USER=evalve EVALVE_DB_PWD=evalve-local-password \
 .venv/bin/python -m evalve_backend
 ```
 
