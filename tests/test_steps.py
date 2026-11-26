@@ -36,13 +36,16 @@ CHANGE = {"experiment": 1, "change": "Name the refund rule", "system_prompt": "A
 
 
 class StepsTest(unittest.TestCase):
+    # Where the Runs of the Loops in the test execute.
+    EXECUTOR = "kitaru"
+
     def setUp(self):
         self.kitaru = FakeKitaru(OWNER["Authorization"])
         self.kitaru.accounts[TEAMMATE["Authorization"]] = {"id": "account-2", "name": "teammate", "active": True}
         owner = self.kitaru.accounts[OWNER["Authorization"]]
         self.kitaru.dashboard_sessions[SESSION["Cookie"], SESSION["X-CSRF-Token"]] = owner
         self.store = MemoryStore()
-        self.api = self.enterContext(client(self.kitaru, store=self.store))
+        self.api = self.enterContext(client(self.kitaru, store=self.store, executor=self.EXECUTOR))
 
     # Calls of the Evalve MCP.
 

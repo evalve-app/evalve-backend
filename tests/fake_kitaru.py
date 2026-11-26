@@ -5,6 +5,9 @@ records every request. Idempotency keys behave as in Kitaru 0.27.6: a key is fin
 the method, path, query and raw body bytes, a retry with the same bytes replays the stored answer,
 and other bytes give 422. `expire_keys` stands for the 900 s retention running out. `fail` and
 `answer_once` make the next matching request answer with something else.
+
+A started run has one job for each cohort member. A registered worker gets a token that expires
+after WORKER_TOKEN_LIFETIME, and a delete answers 204 with no body, as in Kitaru 0.27.6.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ EVALUATOR_ID = "evaluator-1"
 EVALUATOR_VERSION_ID = "evaluator-version-1"
 CONTROL_MODEL = "gpt-small"
 MEMBERS = ("recorded-1", "recorded-2")
+WORKER_TOKEN_LIFETIME = timedelta(seconds=3600)
 
 
 class FakeKitaru:
@@ -47,6 +51,7 @@ class FakeKitaru:
                 "capabilities": {"tools": [], "mcp_servers": [], "skills": []},
             },
         }
+        self.members = list(MEMBERS)
         self.cohort_versions = {COHORT_VERSION_ID: {"id": COHORT_VERSION_ID, "cohort_id": COHORT_ID, "session_count": 2}}
         self.cohorts = {COHORT_ID: {"id": COHORT_ID, "agent_id": AGENT_ID}}
         self.sessions = {
@@ -60,10 +65,24 @@ class FakeKitaru:
         self.runs: dict[str, dict] = {}
         self.replays: dict[str, dict] = {}
         self.evaluations: dict[str, dict] = {}
+        self.jobs: dict[str, dict] = {}
+        # The workers that are registered now, and the token of each worker that was registered.
+        self.workers: dict[str, dict] = {}
+        self.worker_tokens: dict[str, str] = {}
+        self._observers: list[tuple[str, str, object]] = []
         self.keys: dict[str, tuple[str, httpx.Response]] = {}
         # Kitaru's clock and the backend's agree, as on one deployment.
         self.now = datetime.now(timezone.utc)
         self._ids = count(1)
+
+    def add_member(self, session_id: str) -> None:
+        """One more session in the cohort version. Call it before the Loop starts."""
+        self.members.append(session_id)
+        self.sessions[session_id] = {
+            "id": session_id, "name": f"Case {len(self.members)}", "agent_version_id": AGENT_VERSION_ID,
+            "cost": "0.05", "status": "completed", "cohort_version_ids": [COHORT_VERSION_ID],
+        }
+        self.cohort_versions[COHORT_VERSION_ID]["session_count"] = len(self.members)
 
     def fail(self, method: str, path_pattern: str, status: int, detail: str = "Failed on purpose.") -> None:
         """Answer the next request whose method and path match with this error."""
@@ -71,6 +90,10 @@ class FakeKitaru:
 
     def answer_once(self, method: str, path_pattern: str, response: httpx.Response) -> None:
         self._failures.append((method, path_pattern, response))
+
+    def observe(self, method: str, path_pattern: str, callback) -> None:
+        """Call `callback()` when a matching request arrives, before the fake answers it."""
+        self._observers.append((method, path_pattern, callback))
 
     def expire_keys(self) -> None:
         self.keys.clear()
@@ -112,7 +135,7 @@ class FakeKitaru:
         run = self.runs[run_id]
         run["status"] = "failed" if outcome == "incomplete" else "completed"
         experiment = self.experiments[run["experiment_id"]]
-        for index, baseline_id in enumerate(MEMBERS):
+        for index, baseline_id in enumerate(self.members):
             replay_id, result_id = self._new_id("replay"), self._new_id("session")
             has_result = not (outcome == "incomplete" and index == 1)
             self.replays[replay_id] = {
@@ -153,6 +176,9 @@ class FakeKitaru:
         path = request.url.path
         if path == "/api/v1/accounts/me":
             return httpx.Response(200, json=account)
+        for method, pattern, callback in self._observers:
+            if method == request.method and re.fullmatch(pattern, path):
+                callback()
         for failure in self._failures:
             method, pattern, response = failure
             if method == request.method and re.fullmatch(pattern, path):
@@ -208,6 +234,9 @@ class FakeKitaru:
             ("GET", r"/api/v1/experiment-runs", lambda r: self._page(r, self.runs.values())),
             ("GET", r"/api/v1/experiment-runs/([^/]+)", lambda r, i: self._one(self.runs, i)),
             ("POST", r"/api/v1/experiment-runs/([^/]+)/cancel", self._cancel_run),
+            ("GET", r"/api/v1/experiment-runs/([^/]+)/jobs", self._run_jobs),
+            ("POST", r"/api/v1/workers", self._register_worker),
+            ("DELETE", r"/api/v1/workers/([^/]+)", self._delete_worker),
             ("GET", r"/api/v1/replays", lambda r: self._page(r, self.replays.values())),
             ("GET", r"/api/v1/evaluations", lambda r: self._page(r, self.evaluations.values())),
         )
@@ -238,7 +267,41 @@ class FakeKitaru:
         body = json.loads(request.content)
         run = self.add_run(experiment_id, cohort_version_id=body["cohort_version_id"],
                            agent_version_id=body["agent_version_id"])
+        # As in Kitaru, the start call makes one job for each session of the cohort version.
+        for _member in self.members:
+            job_id = self._new_id("job")
+            self.jobs[job_id] = {"id": job_id, "kind": "replay", "status": "running", "experiment_run_id": run["id"]}
         return httpx.Response(201, json=run)
+
+    def _run_jobs(self, request, run_id):
+        if run_id not in self.runs:
+            return httpx.Response(404, json={"detail": "Experiment run not found."})
+        return self._page(request, [job for job in self.jobs.values() if job["experiment_run_id"] == run_id])
+
+    def _register_worker(self, request):
+        body = json.loads(request.content)
+        scope = body.get("scope") or {}
+        # The request model of Kitaru: a name, a scope with 1 to 16 claims, and a runtime with a platform.
+        valid = (
+            isinstance(body.get("name"), str) and isinstance((body.get("runtime") or {}).get("platform"), str)
+            and set(body) <= {"name", "scope", "runtime", "metadata"} and set(scope) <= {"claims", "selectors", "job_id"}
+            and 1 <= len(scope.get("claims") or []) <= 16 and scope.get("selectors") != []
+        )
+        if not valid:
+            return httpx.Response(422, json={"detail": "Invalid worker."})
+        worker_id = self._new_id("worker")
+        self.workers[worker_id] = {"id": worker_id, "name": body["name"], "scope": scope, "runtime": body["runtime"]}
+        self.worker_tokens[worker_id] = f"worker-token-value-{worker_id}"
+        expires = self.tick() + WORKER_TOKEN_LIFETIME
+        return httpx.Response(200, json={
+            "worker": self.workers[worker_id], "token": self.worker_tokens[worker_id],
+            "token_expires_at": expires.isoformat().replace("+00:00", "Z"),
+        })
+
+    def _delete_worker(self, request, worker_id):
+        if self.workers.pop(worker_id, None) is None:
+            return httpx.Response(404, json={"detail": "Worker not found."})
+        return httpx.Response(204)
 
     def _cancel_run(self, request, run_id):
         run = self.runs.get(run_id)

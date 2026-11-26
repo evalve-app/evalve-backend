@@ -47,6 +47,32 @@ class KitaruApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.headers["idempotency-key"], "evalve-loop-exp-0-run-1")
         self.assertEqual(first.url.path, "/api/v1/experiments/exp-1/runs")
 
+    async def test_a_worker_is_registered_for_one_job_with_an_agent_claim_and_an_evaluator_claim(self):
+        reply = {"worker": {"id": "worker-1"}, "token": "worker-token", "token_expires_at": "2026-11-25T21:00:00Z"}
+        api = self.use(lambda request: httpx.Response(200, json=reply))
+        self.assertEqual(await api.register_worker("evalve-loop-1", "job-1"), reply)
+        (request,) = self.requests
+        self.assertEqual((request.method, request.url.path), ("POST", "/api/v1/workers"))
+        self.assertEqual(json.loads(request.content), {
+            "name": "evalve-loop-1", "runtime": {"platform": "fargate"},
+            "scope": {"claims": [{"kind": "agent"}, {"kind": "evaluator"}], "job_id": "job-1"},
+        })
+        self.assertNotIn("idempotency-key", request.headers)
+
+    async def test_the_jobs_of_a_run_are_listed_page_by_page(self):
+        pages = {None: {"items": [{"id": "job-1"}], "next_cursor": "next"}, "next": {"items": [{"id": "job-2"}], "next_cursor": None}}
+        api = self.use(lambda request: httpx.Response(200, json=pages[request.url.params.get("cursor")]))
+        self.assertEqual([job["id"] for job in await api.list_run_jobs("run-1")], ["job-1", "job-2"])
+        self.assertEqual({r.url.path for r in self.requests}, {"/api/v1/experiment-runs/run-1/jobs"})
+
+    async def test_a_worker_delete_with_no_body_succeeds_and_a_missing_worker_is_not_found(self):
+        api = self.use(lambda request: httpx.Response(204))
+        self.assertIsNone(await api.delete_worker("worker-1"))
+        (request,) = self.requests
+        self.assertEqual((request.method, request.url.path), ("DELETE", "/api/v1/workers/worker-1"))
+        with self.assertRaises(KitaruNotFound):
+            await self.failing(404).delete_worker("worker-1")
+
     def test_canonical_refuses_values_that_are_not_json(self):
         with self.assertRaises(ValueError):
             canonical({"cost": float("nan")})

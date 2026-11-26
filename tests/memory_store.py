@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from evalve_backend.store import (
-    LIVE_TASK_STATES, LoopStart, RunPlan, StartResult, Store, PollResult, dump_store_json, run_is_open,
+    LIVE_TASK_STATES, LoopStart, RunPlan, RunWorker, StartResult, Store, PollResult, dump_store_json, run_is_open,
     task_accepts,
     validate_task_end, validate_transition,
 )
@@ -103,7 +103,7 @@ class MemoryStore(Store):
         if loop:
             for experiment in loop["experiments"]:
                 for run in experiment["runs"]:
-                    del run["evidence"], run["deadline_at"]
+                    del run["evidence"]
         return loop
 
     def list_loops(self, owner, *, status=None, agent_id=None, limit=50, before=None):
@@ -181,6 +181,8 @@ class MemoryStore(Store):
         summary = json.loads(dump_store_json(result))
         evidence = summary.pop("rows")
         saved.update(result=summary, evidence=evidence, collected_at=collected_at)
+        for worker in self._workers.get((loop_id, experiment, run), []):
+            worker["worker_token"] = None
         loop.update(waiting_since=collected_at if needs_change else None, updated_at=datetime.now(timezone.utc))
         return True
 
@@ -191,14 +193,71 @@ class MemoryStore(Store):
             return False
         loop.update(status=to_status, outcome=outcome, reason=reason, waiting_since=None,
                     pending_change=None, updated_at=datetime.now(timezone.utc))
+        for (worker_loop, _experiment, _run), workers in self._workers.items():
+            if worker_loop == loop_id:
+                for worker in workers:
+                    worker["worker_token"] = None
         return True
 
+    def add_run_worker(self, owner, loop_id, experiment, run, worker: RunWorker):
+        saved = self._find_run(self._find_experiment(self._running_loop(owner, loop_id), experiment), run)
+        if saved is None or saved["run_id"] is None or saved["collected_at"] is not None:
+            return False
+        workers = self._workers.setdefault((loop_id, experiment, run), [])
+        if any(item["job_id"] == worker.job_id for item in workers):
+            return False
+        workers.append({
+            "job_id": worker.job_id, "worker_id": worker.worker_id, "worker_token": worker.token,
+            "token_expires_at": worker.token_expires_at, "worker_deleted_at": None,
+        })
+        if saved["deadline_at"] is None:
+            saved["deadline_at"] = worker.token_expires_at
+        return True
+
+    def run_workers(self, owner, loop_id, experiment, run):
+        if self._owned_loop(owner, loop_id) is None:
+            return []
+        workers = sorted(self._workers.get((loop_id, experiment, run), []), key=lambda worker: worker["job_id"])
+        return [{
+            "job_id": worker["job_id"], "worker_id": worker["worker_id"], "has_token": worker["worker_token"] is not None,
+            "token_expires_at": worker["token_expires_at"], "worker_deleted_at": worker["worker_deleted_at"],
+        } for worker in workers]
+
+    def workers_to_delete(self, owner, loop_id):
+        loop = self._owned_loop(owner, loop_id)
+        if loop is None:
+            return []
+        found = []
+        for (worker_loop, experiment, run), workers in sorted(self._workers.items()):
+            if worker_loop != loop_id:
+                continue
+            saved = self._find_run(self._find_experiment(loop, experiment), run)
+            if loop["status"] == "running" and saved["collected_at"] is None:
+                continue
+            found += [
+                {"experiment_number": experiment, "run_number": run, "job_id": worker["job_id"], "worker_id": worker["worker_id"]}
+                for worker in sorted(workers, key=lambda worker: worker["job_id"])
+                if worker["worker_id"] is not None and worker["worker_deleted_at"] is None
+            ]
+        return found
+
+    def record_worker_deleted(self, owner, loop_id, experiment, run, job_id, deleted_at):
+        if self._owned_loop(owner, loop_id) is None:
+            return False
+        for worker in self._workers.get((loop_id, experiment, run), []):
+            if worker["job_id"] == job_id and worker["worker_deleted_at"] is None:
+                worker.update(worker_deleted_at=deleted_at, worker_token=None)
+                return True
+        return False
+
     def seed_assignments(self, loop_id, experiment, run, deadline, workers):
-        """Test setup only. The story for the workers of a Run adds the store function for this."""
+        """Test setup only: a deadline and workers that `add_run_worker` does not permit, for example a worker with no token."""
         saved = self._find_run(self._find_experiment(self._loops[loop_id], experiment), run)
         saved["deadline_at"] = deadline
         self._workers[loop_id, experiment, run] = [
-            {"job_id": job_id, "worker_id": worker_id, "worker_token": token} for job_id, worker_id, token in workers
+            {"job_id": job_id, "worker_id": worker_id, "worker_token": token, "token_expires_at": None,
+             "worker_deleted_at": None}
+            for job_id, worker_id, token in workers
         ]
 
     def add_loop_task(self, owner, loop_id, secret_hash, *, experiment=None, run=None):
@@ -248,7 +307,8 @@ class MemoryStore(Store):
             return PollResult()
         workers = self._workers.get((loop_id, experiment["number"], run["number"]), [])
         return PollResult(run["deadline_at"], tuple(
-            {"run_id": run["run_id"], **worker}
+            {"run_id": run["run_id"], "job_id": worker["job_id"], "worker_id": worker["worker_id"],
+             "worker_token": worker["worker_token"]}
             for worker in sorted(workers, key=lambda worker: worker["job_id"])
             if worker["worker_token"] is not None
         ))

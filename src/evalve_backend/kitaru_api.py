@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 500
 IN_PROGRESS = "still in progress"
+# What a worker of a Loop task reports as its runtime. Kitaru stores the text and does not read it.
+WORKER_PLATFORM = "fargate"
 
 
 class KitaruTransient(Exception):
@@ -120,6 +122,9 @@ class KitaruApi:
             logger.warning("Kitaru did not answer a %s request (%s).", method, type(error).__name__)
             raise KitaruTransient from None
         status = response.status_code
+        if status == 204:
+            # A delete answers with no body.
+            return {}
         if 200 <= status < 300:
             try:
                 return response.json()
@@ -212,6 +217,26 @@ class KitaruApi:
 
     async def cancel_run(self, run_id: str) -> dict:
         return await self._send("POST", f"/api/v1/experiment-runs/{run_id}/cancel")
+
+    # The workers of one run. A worker token is in the reply of a registration and nowhere else.
+
+    async def list_run_jobs(self, run_id: str) -> list[dict]:
+        """The jobs of a run. Kitaru makes one job for each session inside the start call."""
+        return await self._list(f"/api/v1/experiment-runs/{run_id}/jobs")
+
+    async def register_worker(self, name: str, job_id: str) -> dict:
+        """Register a worker that claims only the agent task and the evaluator tasks of one job.
+
+        The reply has `worker` (with its `id`), `token` and `token_expires_at`. Kitaru makes a new
+        worker for each call, so a call that is sent again leaves two workers.
+        """
+        scope = {"claims": [{"kind": "agent"}, {"kind": "evaluator"}], "job_id": job_id}
+        return await self._send("POST", "/api/v1/workers", body={
+            "name": name, "scope": scope, "runtime": {"platform": WORKER_PLATFORM},
+        })
+
+    async def delete_worker(self, worker_id: str) -> None:
+        await self._send("DELETE", f"/api/v1/workers/{worker_id}")
 
     # The evidence of one run.
 

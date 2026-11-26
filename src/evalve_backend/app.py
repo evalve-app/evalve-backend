@@ -15,7 +15,7 @@ from evalve_backend.loop_task_api import SECURITY_SCHEME as LOOP_TASK_SECRET, ro
 from evalve_backend.loops_api import router as loops_router
 from evalve_backend.loop_steps import LoopSteps
 from evalve_backend.settings import Settings
-from evalve_backend.steps import KitaruLoopSteps
+from evalve_backend.steps import Executor, KitaruLoopSteps
 from evalve_backend.store import PostgresStore, Store
 
 PREFIX = "/evalve"
@@ -31,7 +31,10 @@ def create_app(
     database_ping: Callable[[Settings], bool] = database.ping,
     store: Store | None = None,
     loop_steps: LoopSteps | None = None,
+    executor: Executor = "kitaru",
 ) -> FastAPI:
+    """Build the app. `executor` says where the Runs execute. It is `kitaru` until the story sc-283
+    makes it a deployment setting, and the tests of the workers of a Run set `fargate`."""
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # trust_env is off so a proxy variable can never reroute a credential.
@@ -45,7 +48,8 @@ def create_app(
             app.state.kitaru = kitaru
             if loop_steps is None:
                 # The Loop steps call the same Kitaru server with each caller's own key.
-                app.state.loop_steps = KitaruLoopSteps(kitaru, app.state.loop_store, settings.kitaru_url)
+                app.state.loop_steps = KitaruLoopSteps(
+                    kitaru, app.state.loop_store, settings.kitaru_url, executor=executor)
             yield
 
     app = FastAPI(
