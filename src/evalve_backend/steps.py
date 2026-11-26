@@ -300,8 +300,12 @@ class _Step:
                             worker["run_number"], worker["job_id"], self.now)
 
     async def stop_open_run(self) -> None:
-        """Cancel the Run that an ended Loop leaves open. No worker claims its tasks after the end,
-        and a pending task has no timeout in Kitaru. A failure never fails the call."""
+        """Cancel the Run that an ending Loop leaves open. No worker claims its tasks after the end,
+        and a pending task has no timeout in Kitaru.
+
+        A temporary error stops the call before the Loop ends. The Loop stays running, so a later call
+        comes to the same end and cancels again. Nothing after the end would try the cancel again.
+        """
         if not self.loop_task_workers:
             return
         runs = self.loop["experiments"][-1]["runs"]
@@ -309,8 +313,11 @@ class _Step:
             return
         try:
             await self.executor.cancel(runs[-1]["run_id"])
-        except (KitaruTransient, KitaruRejected) as error:
-            logger.warning("Could not cancel the open Run of Loop %s (%s).", self.loop_id, type(error).__name__)
+        except KitaruTransient:
+            raise StepUnavailable from None
+        except KitaruRejected as error:
+            # A later cancel gets the same answer, so the Loop ends.
+            logger.warning("Kitaru refused to cancel the open Run of Loop %s (HTTP %d).", self.loop_id, error.status)
 
     def past_deadline(self, run: dict) -> bool:
         return self.loop_task_workers and run["deadline_at"] is not None and self.now > run["deadline_at"]
@@ -410,11 +417,14 @@ class _Step:
 
     async def end(self, stop: str, reason: str | None, experiment: int | None = None) -> None:
         ending = loop_rules.end_state(stop, experiment)
+        # The store can hold a run ID that this call recorded after it read the Loop.
+        if not await self.load():
+            return
+        await self.stop_open_run()
         ended = await to_thread(self.store.transition, self.owner, self.loop_id, ("running",),
                                 ending["status"], ending["outcome"], reason)
         if ended:
             await self.load()
-            await self.stop_open_run()
             # No Run of an ended Loop is open, so each worker that is left goes.
             await self.delete_workers()
             await self.publish(ended=stop, reason=reason)

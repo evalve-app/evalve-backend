@@ -248,6 +248,19 @@ class CollectTest(RunWorkersTest):
         self.assertIn("POST /workers, HTTP 422", reply.json()["reason"])
         self.assertEqual(self.kitaru.runs[self.latest_run()]["status"], "canceled")
 
+    def test_a_loop_does_not_end_while_kitaru_cannot_cancel_its_open_run(self):
+        self.kitaru.fail("POST", WORKERS, 422, "Invalid worker.")
+        self.kitaru.fail("POST", CANCEL, 503)
+        self.start()
+        loop_id = next(iter(self.store._loops))
+        # The Loop stays running, so a later drive comes to the same end and cancels again.
+        self.assertEqual(self.stored(loop_id)["status"], "running")
+        self.assertEqual(self.kitaru.runs[self.latest_run()]["status"], "running")
+        self.kitaru.fail("POST", WORKERS, 422, "Invalid worker.")
+        self.assertEqual(self.status(loop_id)["status"], "failed")
+        self.assertEqual(self.kitaru.runs[self.latest_run()]["status"], "canceled")
+        self.assertEqual(self.kitaru.workers, {})
+
     def test_a_worker_that_kitaru_refuses_to_delete_does_not_stop_the_others(self):
         loop_id = self.started()
         self.finish("green")
