@@ -6,7 +6,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from evalve_backend.store import LoopStart, RunPlan, StartResult, Store, dump_store_json, validate_transition
+from evalve_backend.store import (
+    LIVE_TASK_STATES, LoopStart, RunPlan, StartResult, Store, PollResult, dump_store_json, run_is_open,
+    task_accepts,
+    validate_task_end, validate_transition,
+)
 
 
 class _MemoryLock:
@@ -25,6 +29,8 @@ class MemoryStore(Store):
         self._starts: dict[tuple[str, str], tuple[str, str]] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._tasks: dict[str, list[dict]] = {}
+        self._workers: dict[tuple[str, int, int], list[dict]] = {}
 
     def lock_loop(self, loop_id):
         with self._locks_guard:
@@ -73,7 +79,7 @@ class MemoryStore(Store):
             "number": number, "estimated_cost_usd": plan.estimated_cost_usd,
             "cohort_version_id": plan.cohort_version_id, "agent_version_id": plan.agent_version_id,
             "submit_started_at": plan.submit_started_at, "start_sent_at": None, "run_id": None,
-            "result": None, "evidence": None, "collected_at": None,
+            "result": None, "evidence": None, "collected_at": None, "deadline_at": None,
         }
 
     def _owned_loop(self, owner, loop_id):
@@ -97,7 +103,7 @@ class MemoryStore(Store):
         if loop:
             for experiment in loop["experiments"]:
                 for run in experiment["runs"]:
-                    del run["evidence"]
+                    del run["evidence"], run["deadline_at"]
         return loop
 
     def list_loops(self, owner, *, status=None, agent_id=None, limit=50, before=None):
@@ -186,3 +192,63 @@ class MemoryStore(Store):
         loop.update(status=to_status, outcome=outcome, reason=reason, waiting_since=None,
                     pending_change=None, updated_at=datetime.now(timezone.utc))
         return True
+
+    def seed_assignments(self, loop_id, experiment, run, deadline, workers):
+        """Test setup only. The story for the workers of a Run adds the store function for this."""
+        saved = self._find_run(self._find_experiment(self._loops[loop_id], experiment), run)
+        saved["deadline_at"] = deadline
+        self._workers[loop_id, experiment, run] = [
+            {"job_id": job_id, "worker_id": worker_id, "worker_token": token} for job_id, worker_id, token in workers
+        ]
+
+    def add_loop_task(self, owner, loop_id, secret_hash, *, experiment=None, run=None):
+        if self._running_loop(owner, loop_id) is None:
+            return None
+        tasks = self._tasks.setdefault(loop_id, [])
+        tasks.append({
+            "loop_id": loop_id, "attempt": len(tasks) + 1, "secret_hash": secret_hash, "state": "starting",
+            "task_arn": None, "task_definition_arn": None, "created_at": datetime.now(timezone.utc),
+            "first_poll_at": None, "last_poll_at": None, "contract_version": None, "stop_reason": None,
+            "experiment_number": experiment, "run_number": run,
+        })
+        return len(tasks)
+
+    def end_loop_task(self, loop_id, attempt, state, stop_reason=None):
+        validate_task_end(state)
+        task = next((item for item in self._tasks.get(loop_id, []) if item["attempt"] == attempt), None)
+        if task is None or task["state"] not in LIVE_TASK_STATES:
+            return False
+        task.update(state=state, stop_reason=stop_reason)
+        return True
+
+    def _newest_task(self, loop_id):
+        tasks = self._tasks.get(loop_id)
+        return (tasks[-1], self._loops[loop_id]["status"]) if tasks else (None, None)
+
+    def latest_loop_task(self, loop_id):
+        return deepcopy(self._newest_task(loop_id)[0])
+
+    def accepts_loop_task(self, loop_id, secret_hash):
+        return task_accepts(*self._newest_task(loop_id), secret_hash)
+
+    def record_poll(self, loop_id, secret_hash, contract_version, polled_at, *, last=False, refused_reason=None):
+        task, loop_status = self._newest_task(loop_id)
+        if not task_accepts(task, loop_status, secret_hash):
+            return None
+        if refused_reason is not None:
+            task.update(state="failed_start", contract_version=contract_version, stop_reason=refused_reason)
+            return PollResult()
+        task.update(state="exited" if last else "alive", contract_version=contract_version, last_poll_at=polled_at,
+                    first_poll_at=task["first_poll_at"] or polled_at)
+        if last:
+            return PollResult()
+        experiment = self._loops[loop_id]["experiments"][-1]
+        run = experiment["runs"][-1]
+        if not run_is_open(run, polled_at):
+            return PollResult()
+        workers = self._workers.get((loop_id, experiment["number"], run["number"]), [])
+        return PollResult(run["deadline_at"], tuple(
+            {"run_id": run["run_id"], **worker}
+            for worker in sorted(workers, key=lambda worker: worker["job_id"])
+            if worker["worker_token"] is not None
+        ))

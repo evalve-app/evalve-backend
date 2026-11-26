@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from evalve_backend import __version__, database
 from evalve_backend.auth import CSRF_HEADER, Account, require_account
+from evalve_backend.loop_task_api import SECURITY_SCHEME as LOOP_TASK_SECRET, router as loop_task_router
 from evalve_backend.loops_api import router as loops_router
 from evalve_backend.loop_steps import LoopSteps
 from evalve_backend.settings import Settings
@@ -76,6 +77,7 @@ def create_app(
 
     app.include_router(router)
     app.include_router(loops_router, prefix=PREFIX)
+    app.include_router(loop_task_router, prefix=PREFIX)
     build_contract = app.openapi
 
     def contract() -> dict:
@@ -98,6 +100,13 @@ def create_app(
             schemes["CsrfToken"] = {
                 "type": "apiKey", "in": "header", "name": CSRF_HEADER,
                 "description": "The csrf_token of the Kitaru login answer. Kitaru checks it on every request.",
+            }
+            schemes[LOOP_TASK_SECRET] = {
+                "type": "apiKey", "in": "header", "name": "Authorization",
+                "description": (
+                    "The secret of the Loop task, as `EvalveLoopTask <secret>`. Only the route for the "
+                    "Assignments of a Loop task accepts it."
+                ),
             }
             for path in schema["paths"].values():
                 for operation in path.values():

@@ -214,3 +214,24 @@ class LoopReport(LoopSummary):
     spend: Spend
     runs: RunCount
     winner: WinningChange | None
+
+
+class TaskPoll(BaseModel):
+    """The poll of a Supervisor. A later contract version can add a field, and the backend must
+    then refuse the version, not the body. Thus this body permits fields that it does not know."""
+
+    # The limit is the size of the column. The backend stores a version that it refuses.
+    contract_version: Annotated[StrictInt, Field(ge=0, le=2**31 - 1)]
+    last: StrictBool = False
+
+
+class Assignment(BaseModel):
+    run_id: str
+    job_id: str
+    worker_id: str
+    worker_token: str
+
+
+class TaskPollReply(BaseModel):
+    run_deadline: datetime | None
+    assignments: list[Assignment]

@@ -31,16 +31,20 @@ class LoopRoute(APIRoute):
                 response = await handle(request)
             except RequestValidationError as error:
                 problem = error.errors()[0]
-                if problem["type"] == "json_invalid":
-                    # FastAPI decodes JSON before calling dependencies. Check
-                    # identity here, too, before returning a validation error.
-                    await verify_account(request)
+                await self.check_caller(request, problem)
                 location = ".".join(str(part) for part in problem["loc"])
                 raise HTTPException(422, f"Invalid or missing input at {location}.") from None
             response.headers["Cache-Control"] = "no-store"
             return response
 
         return route
+
+    async def check_caller(self, request: Request, problem: dict) -> None:
+        """Refuse a caller that has no good credential, before it gets a validation error."""
+        if problem["type"] == "json_invalid":
+            # FastAPI decodes JSON before calling dependencies. Check
+            # identity here, too, before returning a validation error.
+            await verify_account(request)
 
 
 def errors(*statuses: int) -> dict:

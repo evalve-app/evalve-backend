@@ -443,6 +443,11 @@ class OpenApiTest(unittest.TestCase):
             for operation in operations.values():
                 if path == "/evalve/health":
                     self.assertNotIn("security", operation)
+                elif path == f"{LOOPS}/{{loop_id}}/task/poll":
+                    # A Loop task shows its secret. A Kitaru credential gets 401 on this route.
+                    self.assertEqual(operation["security"], [{"LoopTaskSecret": []}])
+                    self.assertEqual((schemes["LoopTaskSecret"]["in"], schemes["LoopTaskSecret"]["name"]),
+                                     ("header", "Authorization"))
                 else:
                     self.assertEqual(operation["security"], both, path)
                     signed_in += 1
