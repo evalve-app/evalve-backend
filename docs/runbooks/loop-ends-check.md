@@ -33,7 +33,7 @@ Do Loops A, B and C first. They show rows 1, 2, 3 and 8, which are the most impo
   - **The set that passes:** the agent passes the evaluator on this cohort version with no change.
 - For Loop F only: a system prompt that makes the agent pass on the set that fails.
 
-The tool policy must not use `passthrough`, because the Evalve backend refuses live tools.
+The tool policy must not use `passthrough`, because the Evalve backend refuses live tools. The Evalve backend permits only the type `static`, and the type `history` with the scope `baseline`.
 
 This runbook names no fixture. Ask the Teammate for the values if you do not have them.
 

@@ -30,6 +30,7 @@ class ReplayPolicy(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: Nonempty
+    scope: str | None = None
     on_miss: Nonempty | None = None
 
 

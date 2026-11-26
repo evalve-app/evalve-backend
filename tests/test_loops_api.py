@@ -117,6 +117,11 @@ class LoopApiTest(unittest.TestCase):
     def start(self, settings=START, *, key="start", headers=AUTH):
         return self.api.post(LOOPS, headers=headers | {"Idempotency-Key": key}, json=settings)
 
+    def refused_policy(self, policy):
+        response = self.start(START | {"tool_policy": policy})
+        self.assertEqual(response.status_code, 422, response.text)
+        return response.json()["detail"]
+
     def make_loop(self):
         response = self.start()
         self.assertEqual(response.status_code, 201, response.text)
@@ -349,13 +354,72 @@ class LoopApiTest(unittest.TestCase):
                 self.assertIsInstance(response.json()["detail"], str)
         for policy in (
             {"default": {"type": "passthrough"}},
-            {"default": {"type": "history", "on_miss": "passthrough"}},
-            {"default": {"type": "history"}, "tools": {"write": {"type": "passthrough"}}},
+            {"default": {"type": "history", "scope": "baseline", "on_miss": "passthrough"}},
+            {"default": {"type": "history", "scope": "baseline"}, "tools": {"write": {"type": "passthrough"}}},
+            # Live tools are reported first, before a different fault of the same policy.
+            {"default": {"type": "history", "scope": "agent", "on_miss": "passthrough"}},
         ):
-            self.assertEqual(self.start(START | {"tool_policy": policy}).status_code, 422)
+            self.assertEqual(self.refused_policy(policy), "Live tools are disabled for Loops in v1.")
+        live = self.start(START | {"allow_live_tools": True})
+        self.assertEqual((live.status_code, live.json()["detail"]), (422, "Live tools are disabled for Loops in v1."))
         self.assertEqual(self.api.post(LOOPS, headers=AUTH, json=START).status_code, 422)
         self.assertEqual(self.steps.calls, [])
         self.assertEqual(self.store.list_loops(None), [])
+
+    def test_a_loop_starts_with_static_and_with_history_of_the_baseline_scope(self):
+        baseline = {"type": "history", "scope": "baseline", "on_miss": "error_result"}
+        for number, policy in enumerate((
+            {"default": {"type": "static"}},
+            {"default": baseline, "tools": {"search": baseline, "write": {"type": "static"}}},
+        )):
+            with self.subTest(policy=policy):
+                response = self.start(START | {"name": f"Loop {number}", "tool_policy": policy}, key=f"start-{number}")
+                self.assertEqual(response.status_code, 201, response.text)
+
+    def test_a_history_policy_of_a_different_scope_is_refused_with_the_name_of_the_tool(self):
+        for scope in ("cohort_version", "agent", "session"):
+            with self.subTest(scope=scope):
+                self.assertEqual(
+                    self.refused_policy({"default": {"type": "history", "scope": scope, "on_miss": "fail"}}),
+                    "A Loop permits a `history` tool policy only with the scope `baseline`. "
+                    f"The policy for `default` has the scope `{scope}`.",
+                )
+        self.assertEqual(self.steps.calls, [])
+        self.assertEqual(self.store.list_loops(None), [])
+        self.assertEqual({request.url.path for request in self.kitaru.requests}, {"/api/v1/accounts/me"})
+
+    def test_a_history_policy_with_no_scope_is_refused_for_the_tool_that_has_it(self):
+        baseline = {"type": "history", "scope": "baseline", "on_miss": "fail"}
+        rule = "A Loop permits a `history` tool policy only with the scope `baseline`. "
+        self.assertEqual(
+            self.refused_policy({"default": baseline, "tools": {"search": baseline, "write": {"type": "history"}}}),
+            rule + "The policy for `write` has no scope.",
+        )
+        self.assertEqual(
+            self.refused_policy({"default": baseline, "tools": {"write": {"type": "history", "scope": "agent"}}}),
+            rule + "The policy for `write` has the scope `agent`.",
+        )
+        self.assertEqual(
+            self.refused_policy({"default": {"type": "history", "scope": None}}),
+            rule + "The policy for `default` has no scope.",
+        )
+        self.assertEqual(self.steps.calls, [])
+        self.assertEqual(self.store.list_loops(None), [])
+        self.assertEqual({request.url.path for request in self.kitaru.requests}, {"/api/v1/accounts/me"})
+
+    def test_a_policy_of_a_type_that_is_not_static_or_history_is_refused(self):
+        baseline = {"type": "history", "scope": "baseline", "on_miss": "fail"}
+        for policy_type in ("llm", "replay"):
+            with self.subTest(type=policy_type):
+                for policy in ({"default": {"type": policy_type}}, {"default": baseline, "tools": {"write": {"type": policy_type}}}):
+                    self.assertEqual(
+                        self.refused_policy(policy),
+                        f"A Loop does not permit a tool policy of the type `{policy_type}`. "
+                        "The permitted types are `static` and `history`.",
+                    )
+        self.assertEqual(self.steps.calls, [])
+        self.assertEqual(self.store.list_loops(None), [])
+        self.assertEqual({request.url.path for request in self.kitaru.requests}, {"/api/v1/accounts/me"})
 
     def test_preflight_rejection_has_a_plain_message_and_does_not_create_a_loop(self):
         self.steps.preflight_error = PreflightRejected("Select a nonempty cohort.")
@@ -456,6 +520,9 @@ class OpenApiTest(unittest.TestCase):
         self.assertEqual(set(models["LoopDetail"]["properties"]["status"]["enum"]), {"running", "completed", "failed", "cancelled"})
         self.assertIn("passed", models["LoopDetail"]["properties"]["outcome"]["anyOf"][0]["enum"])
         self.assertIn("needs_change", models["LoopNext"]["properties"]["action"]["enum"])
+        # A tool policy has a named scope, and it keeps the fields that Kitaru adds.
+        self.assertEqual(models["ReplayPolicy"]["properties"]["scope"]["anyOf"], [{"type": "string"}, {"type": "null"}])
+        self.assertIs(models["ReplayPolicy"]["additionalProperties"], True)
         # The two routes that start a Run refuse a dashboard session.
         for path in (LOOPS, f"{LOOPS}/{{loop_id}}/experiments"):
             self.assertIn("403", schema["paths"][path]["post"]["responses"], path)

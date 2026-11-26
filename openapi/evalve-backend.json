@@ -962,6 +962,17 @@
             ],
             "title": "On Miss"
           },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
           "type": {
             "minLength": 1,
             "title": "Type",

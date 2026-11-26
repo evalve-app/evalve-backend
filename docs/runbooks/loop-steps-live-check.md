@@ -15,7 +15,7 @@ The tests cover everything else with a fake Kitaru. Use your own Kitaru key. The
 - A cohort version whose agent already passes its evaluators. This makes the Loop end after one green Run. You need:
   - the cohort version ID (a UUID),
   - one evaluator reference (`name@version`) that passes on it,
-  - your project's replay tool policy. It must not use `passthrough`, because v1 refuses live tools.
+  - your project's replay tool policy. It must not use `passthrough`, because v1 refuses live tools. The Evalve backend permits only the type `static`, and the type `history` with the scope `baseline`.
 - Python 3.11 or newer, `curl`, `jq`, and a local PostgreSQL. With Homebrew: `brew services start postgresql@18`.
 
 Set these in your shell:
