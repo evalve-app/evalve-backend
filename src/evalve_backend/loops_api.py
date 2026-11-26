@@ -1,4 +1,8 @@
-"""The v1 Loop routes. Reads are shared; only the Loop owner can advance it."""
+"""The v1 Loop routes. Reads are shared; only the Loop owner moves a Loop.
+
+A Bearer credential of the Loop owner drives the Loop (starts a Run). A dashboard session of the
+Loop owner refreshes it: it records a finished Run and applies an end state, and it starts no Run.
+"""
 
 import base64
 from collections.abc import Awaitable, Callable
@@ -9,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
-from typing import Annotated, TypeVar
+from typing import Annotated, Literal, TypeVar
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
@@ -64,6 +68,28 @@ class Caller:
     @property
     def id(self) -> str:
         return self.account.id
+
+    @property
+    def kind(self) -> Literal["bearer", "session"]:
+        return self.credential.kind
+
+
+ONLY_BEARER_DRIVES = "Only a Bearer credential can start a Run. Use the Evalve MCP."
+
+
+def can_drive(caller: Caller, loop: dict | None) -> bool:
+    """True when this caller can start a Run of the Loop: a Bearer credential of the Loop owner.
+
+    `loop` is None for the Loop that the call would start, which the caller would own. Read the
+    type of a credential only through this function.
+    """
+    return caller.kind == "bearer" and (loop is None or loop["owner_account_id"] == caller.id)
+
+
+def _require_bearer(caller: Caller) -> None:
+    """Refuse a dashboard session on a route that starts a Run, before the route does anything."""
+    if not can_drive(caller, None):
+        raise HTTPException(403, ONLY_BEARER_DRIVES)
 
 
 def get_caller(request: Request, account: Annotated[Account, Depends(require_account)]) -> Caller:
@@ -239,13 +265,17 @@ async def _submit_first(
 
 @router.post(
     "", status_code=201, response_model=models.LoopDetail,
-    responses={200: {"model": models.LoopDetail, "description": "Start request replayed"}, **errors(409)},
+    responses={200: {"model": models.LoopDetail, "description": "Start request replayed"}, **errors(403, 409)},
 )
 async def start_loop(
     body: models.StartLoop, response: Response, caller: SignedIn, store: LoopStore, steps: Steps,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=255)],
 ):
-    """Validate setup and start the Control Experiment. Repeat safely with the same key."""
+    """Validate setup and start the Control Experiment. Repeat safely with the same key.
+
+    Only a Bearer credential can start a Run. A dashboard session gets 403.
+    """
+    _require_bearer(caller)
     if not idempotency_key.strip() or not idempotency_key.isascii() or not idempotency_key.isprintable():
         raise HTTPException(422, "Idempotency-Key must be nonempty printable ASCII.")
     config = _setup(body)
@@ -298,7 +328,14 @@ async def list_loops(
 
 @router.get("/{loop_id}", response_model=models.LoopDetail, responses=errors(404))
 async def loop_status(loop_id: str, caller: SignedIn, store: LoopStore, steps: Steps):
-    """Read saved status. The owner can also advance a running Loop."""
+    """Read saved status. A call from the Loop owner also moves a running Loop.
+
+    With a Bearer credential, the call can drive the Loop: it records a finished Run and starts the
+    next Run. With a dashboard session, the call can only refresh the Loop: it records a finished Run
+    and applies an end state, and it starts no Run. After a refresh, `next.action` can be
+    `start_control`, `resume_start`, `replay` or `retry`: the Loop waits for a call that drives it.
+    The wait limit applies to the two types of credential.
+    """
     loop = await _load(store, loop_id)
     if loop["owner_account_id"] == caller.id and loop["status"] == "running":
         decision = _choose(loop, now=datetime.now(timezone.utc))
@@ -306,7 +343,8 @@ async def loop_status(loop_id: str, caller: SignedIn, store: LoopStore, steps: S
             await _expire(store, loop, decision)
             loop = await _load(store, loop_id)
         elif steps is not None and decision["action"] != "needs_change":
-            await _step(steps.advance(caller.id, loop_id, caller.credential))
+            move = steps.advance if can_drive(caller, loop) else steps.refresh
+            await _step(move(caller.id, loop_id, caller.credential))
             loop = await _load(store, loop_id)
     return await _detail(store, loop)
 
@@ -349,12 +387,17 @@ def _existing_experiment(loop: dict, number: int, override: dict) -> dict | None
 
 
 @router.post(
-    "/{loop_id}/experiments", status_code=201, response_model=models.ExperimentAccepted, responses=errors(404, 409),
+    "/{loop_id}/experiments", status_code=201, response_model=models.ExperimentAccepted,
+    responses=errors(403, 404, 409),
 )
 async def propose_experiment(
     loop_id: str, body: models.ProposeExperiment, caller: SignedIn, store: LoopStore, steps: Steps,
 ):
-    """Accept one proposed change and start the Experiment's first Run."""
+    """Accept one proposed change and start the Experiment's first Run.
+
+    Only a Bearer credential can start a Run. A dashboard session gets 403.
+    """
+    _require_bearer(caller)
     loop = await _load(store, loop_id, owner=caller.id)
     override = {key: value for key, value in (("model", body.model), ("system_prompt", body.system_prompt))
                 if value is not None}

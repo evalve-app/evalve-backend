@@ -37,7 +37,17 @@ class LoopSteps(Protocol):
         ...
 
     async def advance(self, owner: str, loop_id: str, credential: Credential) -> None:
-        """Advance the Loop under its lock. Poll an in-flight Run at most once."""
+        """Drive the Loop under its lock: refresh it, then start the next Run if one is due.
+
+        Poll an in-flight Run at most once.
+        """
+        ...
+
+    async def refresh(self, owner: str, loop_id: str, credential: Credential) -> None:
+        """Refresh the Loop under its lock: record a finished Run and apply an end state.
+
+        Ask Kitaru about an in-flight Run at most once. Start no Run and add no Run row.
+        """
         ...
 
     async def cancel(self, owner: str, loop_id: str, credential: Credential) -> None:

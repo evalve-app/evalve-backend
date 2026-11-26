@@ -13,6 +13,10 @@ A caller signs in one of two ways:
 
 When a request has an `Authorization` header, that header is the credential and
 the cookie is ignored. Kitaru uses the same order.
+
+The two ways have the same rights, with one exception: only a Bearer credential
+starts a Run. `Credential.kind` gives the type, and `loops_api.can_drive` is the
+one function that reads it.
 """
 
 import logging
@@ -20,7 +24,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import Depends, HTTPException, Request
@@ -47,20 +51,22 @@ class Credential:
     """What the caller sent to prove who it is: the headers to send to Kitaru for this caller.
 
     Either `Authorization`, or `Cookie` with `X-CSRF-Token`. The values never go into a repr.
+    `kind` is `bearer` for a key or a token and `session` for the dashboard session.
     """
 
     headers: Mapping[str, str] = field(repr=False)
+    kind: Literal["bearer", "session"]
 
     @classmethod
     def bearer(cls, authorization: str) -> "Credential":
-        return cls(MappingProxyType({"Authorization": authorization}))
+        return cls(MappingProxyType({"Authorization": authorization}), "bearer")
 
     @classmethod
     def session(cls, cookie_name: str, cookie_value: str, csrf_token: str | None) -> "Credential":
         headers = {"Cookie": f"{cookie_name}={cookie_value}"}
         if csrf_token is not None:
             headers[CSRF_HEADER] = csrf_token
-        return cls(MappingProxyType(headers))
+        return cls(MappingProxyType(headers), "session")
 
 
 def read_credential(request: Request, cookie_name: str) -> Credential | None:

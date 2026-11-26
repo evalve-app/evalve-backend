@@ -14,7 +14,7 @@ Every route sits under `/evalve`, so one hostname can serve Kitaru and Evalve.
 | `GET /evalve/v1/me` | Kitaru credential or dashboard session | `200 {"id": "...", "name": "..."}` for the Kitaru account behind the credential. |
 | `POST /evalve/v1/loops/{loop_id}/task/poll` | Secret of the Loop task | The Assignments of the open Run of the Loop, for the Supervisor in the Loop task. See [The secret of a Loop task](#the-secret-of-a-loop-task). |
 
-The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the account that started a Loop can propose, cancel, or advance it. A status read by another account returns stored results.
+The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the Loop owner (the account that started a Loop) can propose, cancel, drive or refresh it. A status call with a Bearer credential of the Loop owner drives the Loop: it records a finished Run and starts the next Run. A status call with a dashboard session of the Loop owner refreshes the Loop: it records a finished Run and applies an end state, and it starts no Run. A status read by another account returns stored results.
 
 A Loop moves forward only when its owner calls: a start, a status call, a change, or a cancel. Each call takes the Loop's lock, does at most one step in Kitaru with the caller's own key, and returns. The backend has no Kitaru key and no background task, and it never stores or logs the caller's key. When Kitaru can't answer, the call returns `503` and the next call tries again. When another call holds the Loop's lock, a status call returns the stored state.
 
@@ -117,7 +117,7 @@ The backend passes the credential to `GET /api/v1/accounts/me` on the Kitaru ser
 - **The `Authorization` header wins.** When a request has the header and the cookie, the header is the credential and the cookie is ignored. Kitaru uses the same order.
 - **Kitaru does the CSRF check.** The backend passes the cookie as a cookie, so Kitaru checks the CSRF token on every request, also on a `GET`. The backend has no CSRF check of its own. That check and the `SameSite=Lax` attribute of the cookie are the protection against cross-site requests.
 - **Only the session cookie is passed on.** The backend does not send the caller's other cookies to Kitaru, and it keeps no cookie from a Kitaru answer.
-- **Both ways have the same rights.** No route treats a dashboard session differently from a key.
+- **Both ways have the same rights, with one exception: only a Bearer credential starts a Run.** `POST /evalve/v1/loops` and `POST /evalve/v1/loops/{loop_id}/experiments` refuse a dashboard session with `403`. A status call with a dashboard session refreshes the Loop and starts no Run. An open browser tab must not start compute. A dashboard session can cancel a Loop.
 
 The browser sends the cookie only to the host that set it. So the dashboard must reach the backend on its own host: `evalve-deploy` sends `/evalve/*` on `dashboard.<hostname>` to the backend. A session lasts 1 hour, and Kitaru does not renew it.
 

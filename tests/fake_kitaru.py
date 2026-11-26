@@ -33,6 +33,8 @@ class FakeKitaru:
         self.authorization = authorization
         # Sign-in answers for each accepted Authorization header. Every account can use every resource.
         self.accounts = {authorization: account or {"id": "account-1", "name": "jack", "active": True}}
+        # Sign-in answers for each accepted dashboard session: (Cookie header, X-CSRF-Token header).
+        self.dashboard_sessions: dict[tuple[str, str], dict] = {}
         self.requests: list[httpx.Request] = []
         self._failures: list[tuple[str, str, httpx.Response]] = []
         self._lost_replies: list[tuple[str, str]] = []
@@ -140,7 +142,12 @@ class FakeKitaru:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        account = self.accounts.get(request.headers.get("authorization"))
+        if "authorization" in request.headers:
+            # As in Kitaru, the header is the credential and the cookie is not a second try.
+            account = self.accounts.get(request.headers["authorization"])
+        else:
+            session = (request.headers.get("cookie"), request.headers.get("x-csrf-token"))
+            account = self.dashboard_sessions.get(session)
         if account is None:
             return httpx.Response(401, json={"detail": "Not authenticated."})
         path = request.url.path
