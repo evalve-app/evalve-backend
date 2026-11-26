@@ -50,6 +50,14 @@ class LoopSteps(Protocol):
         """
         ...
 
+    async def delete_workers(self, owner: str, loop_id: str, credential: Credential) -> None:
+        """Under the Loop lock, delete from Kitaru each worker of the Loop that no Run needs.
+
+        For a call from the Loop owner that does not drive or refresh the Loop: the Loop ended, or
+        it waits for a change. A worker that Kitaru cannot delete now never fails the call.
+        """
+        ...
+
     async def cancel(self, owner: str, loop_id: str, credential: Credential) -> None:
         """Under the Loop lock, reconcile any pending Run and cancel if needed.
 

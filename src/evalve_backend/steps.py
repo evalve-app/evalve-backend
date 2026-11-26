@@ -5,6 +5,10 @@ does at most one step with the caller's credential, and writes each fact to the 
 call that depends on it. The rules come from `loop_rules`; this module applies them.
 
 A drive (`advance`) starts a Run. A refresh records a finished Run or an end state and starts no Run.
+
+With the executor setting `fargate`, a Loop task runs the Runs. A drive registers one Kitaru worker for
+each job of a Run and stores it, and the Loop task reads the workers as its Assignments. The Run has a
+deadline, and the call that collects a Run deletes its workers. A worker token is never logged.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import logging
 from asyncio import to_thread
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import Literal
 
 import httpx
 
@@ -25,11 +30,16 @@ from evalve_backend.executor import (
 from evalve_backend.kitaru_api import KitaruApi, KitaruNotFound, KitaruRejected, KitaruTransient
 from evalve_backend.loop_steps import PreparedStart, StepUnavailable
 from evalve_backend.preflight import preflight, run_spec_hash
-from evalve_backend.store import RunPlan, Store
+from evalve_backend.store import RunPlan, RunWorker, Store
 
 logger = logging.getLogger(__name__)
 
 TERMINAL_RUN_STATUSES = {"completed", "failed", "canceled"}
+# The terminal statuses that a run reaches by itself.
+FINISHED_RUN_STATUSES = TERMINAL_RUN_STATUSES - {"canceled"}
+# Where the Runs execute: on the Kitaru workers of the deployment, or in the Loop task of the Loop.
+# The story sc-283 makes this a deployment setting.
+Executor = Literal["kitaru", "fargate"]
 
 
 def rules_state(loop: dict) -> dict:
@@ -43,14 +53,16 @@ def rules_state(loop: dict) -> dict:
 
 
 class KitaruLoopSteps:
-    """The LoopSteps of the v1 API, with Runs on the Kitaru workers."""
+    """The LoopSteps of the v1 API. The Runs are Kitaru experiment runs, on the executor of the deployment."""
 
     def __init__(self, kitaru: httpx.AsyncClient, store: Store, kitaru_url: str,
-                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+                 clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc), *,
+                 executor: Executor = "kitaru"):
         self._kitaru = kitaru
         self._store = store
         self._kitaru_url = kitaru_url
         self._clock = clock
+        self._executor = executor
 
     async def preflight(self, config: dict, account: Account, credential: Credential) -> PreparedStart:
         try:
@@ -70,6 +82,10 @@ class KitaruLoopSteps:
     async def cancel(self, owner: str, loop_id: str, credential: Credential) -> None:
         await self._locked(owner, loop_id, credential, lambda step: step.cancel())
 
+    async def delete_workers(self, owner: str, loop_id: str, credential: Credential) -> None:
+        if self._executor == "fargate":
+            await self._locked(owner, loop_id, credential, lambda step: step.delete_leftover_workers())
+
     async def _locked(self, owner: str, loop_id: str, credential: Credential,
                       action: Callable[[_Step], Awaitable[None]]) -> None:
         # A second call does not wait. A status call shows the stored state, and a start, change or
@@ -79,7 +95,8 @@ class KitaruLoopSteps:
             return
         try:
             api = KitaruApi(self._kitaru, credential)
-            step = _Step(self._store, api, KitaruExecutor(api), owner, loop_id, self._clock())
+            step = _Step(self._store, api, KitaruExecutor(api), owner, loop_id, self._clock(),
+                         loop_task_workers=self._executor == "fargate")
             try:
                 await action(step)
             except KitaruTransient:
@@ -95,9 +112,12 @@ class KitaruLoopSteps:
 class _Step:
     """One locked call on one Loop. `loop` is reloaded from the store after each write."""
 
-    def __init__(self, store: Store, api: KitaruApi, executor: KitaruExecutor, owner: str, loop_id: str, now: datetime):
+    def __init__(self, store: Store, api: KitaruApi, executor: KitaruExecutor, owner: str, loop_id: str, now: datetime,
+                 *, loop_task_workers: bool = False):
         self.store, self.api, self.executor = store, api, executor
         self.owner, self.loop_id, self.now = owner, loop_id, now
+        # True when a Loop task runs the Runs, so each job of a Run needs a worker from the backend.
+        self.loop_task_workers = loop_task_workers
         self.loop: dict = {}
 
     async def load(self) -> bool:
@@ -129,14 +149,19 @@ class _Step:
     async def settle(self) -> dict | None:
         """The part that a refresh and a drive share: collect a finished Run and apply an end state.
 
-        Returns the decision that is left for a drive, or None when the Loop has nothing to start now.
+        Returns the decision that is left for a drive: `collect` while the Run is still open. Returns
+        None when the Loop has nothing more to do now.
         """
         if not await self.load():
             return None
+        # A worker that an earlier call could not delete.
+        await self.delete_workers()
         decision = self.decide()
         if decision["action"] == "collect":
             # Ask Kitaru one time. A Run that is still going is collected by a later call.
-            if not await self.collect() or not await self.load():
+            if not await self.collect():
+                return decision
+            if not await self.load():
                 return None
             decision = self.decide()
         if decision["action"].startswith("stop_"):
@@ -149,10 +174,20 @@ class _Step:
         decision = await self.settle()
         if decision is None:
             return
-        if decision["action"] == "resume_start":
+        if decision["action"] == "collect":
+            # An earlier drive can have failed before each job of the open Run had a worker.
+            experiment = self.loop["experiments"][-1]
+            await self.register_workers(experiment["number"], experiment["runs"][-1])
+        elif decision["action"] == "resume_start":
             await self.submit(decision["experiment"])
         elif decision["action"] in ("replay", "retry"):
             await self.next_run()
+
+    async def delete_leftover_workers(self) -> None:
+        """For a Loop that ended or that waits for a change: a worker that an earlier call could not delete."""
+        await self.load()
+        if self.loop:
+            await self.delete_workers()
 
     async def cancel(self) -> None:
         if not await self.load():
@@ -208,7 +243,84 @@ class _Step:
         # A cancel waits for this request to settle, so record it before it can be sent.
         await to_thread(self.store.record_start_sent, self.owner, self.loop_id, number, run["number"], self.now)
         run_id = await self.executor.submit(experiment_id, self.run_spec(experiment, run), self.known_run_ids(), self.now)
-        await to_thread(self.store.record_run_id, self.owner, self.loop_id, number, run["number"], run_id)
+        if await to_thread(self.store.record_run_id, self.owner, self.loop_id, number, run["number"], run_id):
+            await self.register_workers(number, run | {"run_id": run_id})
+
+    # The workers of a Run. Only a drive registers them.
+
+    async def register_workers(self, experiment: int, run: dict) -> None:
+        """Register one worker for each job of the open Run that has none, and store each one at once.
+
+        A failure leaves the workers that are stored, and the next drive registers the others. A worker
+        that Kitaru registered and that the store did not get stays in Kitaru with a token that nobody
+        holds. It claims nothing (a known limit).
+        """
+        if not self.loop_task_workers:
+            return
+        run_key = (self.owner, self.loop_id, experiment, run["number"])
+        with_worker = {worker["job_id"] for worker in await to_thread(self.store.run_workers, *run_key)}
+        # Kitaru makes one job for each session of the cohort version, so this Run has each worker.
+        if len(with_worker) >= len(self.loop["preflight"]["members"]):
+            return
+        try:
+            jobs = await self.api.list_run_jobs(run["run_id"])
+        except KitaruNotFound:
+            # The run is gone. The next call records the Run as incomplete.
+            return
+        for job in jobs:
+            if job["id"] in with_worker:
+                continue
+            registered = await self.api.register_worker(f"evalve-{self.loop_id}-job-{job['id']}", job["id"])
+            worker = RunWorker(job["id"], registered["worker"]["id"], registered["token"],
+                               datetime.fromisoformat(registered["token_expires_at"]))
+            if not await to_thread(self.store.add_run_worker, *run_key, worker):
+                # The Loop ended or the Run was collected, so the Run needs no worker.
+                return
+
+    async def delete_workers(self) -> None:
+        """Delete from Kitaru each worker that no Run needs. A failure never fails the call.
+
+        The row of a worker that Kitaru could not delete stays, and each later call tries again.
+        """
+        if not self.loop_task_workers:
+            return
+        for worker in await to_thread(self.store.workers_to_delete, self.owner, self.loop_id):
+            try:
+                await self.api.delete_worker(worker["worker_id"])
+            except KitaruNotFound:
+                # The worker is already gone.
+                pass
+            except KitaruTransient:
+                logger.warning("Kitaru could not delete the workers of Loop %s now.", self.loop_id)
+                return
+            except KitaruRejected as error:
+                logger.warning("Kitaru refused to delete a worker of Loop %s (HTTP %d).", self.loop_id, error.status)
+                continue
+            await to_thread(self.store.record_worker_deleted, self.owner, self.loop_id, worker["experiment_number"],
+                            worker["run_number"], worker["job_id"], self.now)
+
+    async def stop_open_run(self) -> None:
+        """Cancel the Run that an ending Loop leaves open. No worker claims its tasks after the end,
+        and a pending task has no timeout in Kitaru.
+
+        A temporary error stops the call before the Loop ends. The Loop stays running, so a later call
+        comes to the same end and cancels again. Nothing after the end would try the cancel again.
+        """
+        if not self.loop_task_workers:
+            return
+        runs = self.loop["experiments"][-1]["runs"]
+        if not runs or runs[-1]["run_id"] is None or runs[-1]["result"] is not None:
+            return
+        try:
+            await self.executor.cancel(runs[-1]["run_id"])
+        except KitaruTransient:
+            raise StepUnavailable from None
+        except KitaruRejected as error:
+            # A later cancel gets the same answer, so the Loop ends.
+            logger.warning("Kitaru refused to cancel the open Run of Loop %s (HTTP %d).", self.loop_id, error.status)
+
+    def past_deadline(self, run: dict) -> bool:
+        return self.loop_task_workers and run["deadline_at"] is not None and self.now > run["deadline_at"]
 
     async def fits_budget(self, estimate) -> bool:
         decision = loop_rules.decide(self.config, self.state())
@@ -246,28 +358,52 @@ class _Step:
     # Collecting a finished Run.
 
     async def collect(self) -> bool:
-        """Score the Run in flight if it ended. False while it is still running."""
+        """Score the Run in flight if it ended, or if its deadline is past. False while it is still open.
+
+        The order matters: score, store the result and erase the worker tokens, then delete the workers.
+        Kitaru sets the `worker_id` of a task to null when its worker is deleted.
+        """
         experiment = self.loop["experiments"][-1]
         run = experiment["runs"][-1]
         state = self.state()
         try:
             kitaru_run = await self.executor.poll(run["run_id"])
+            stopped_at_deadline = False
+            if kitaru_run["status"] not in TERMINAL_RUN_STATUSES:
+                if not self.past_deadline(run):
+                    return False
+                # A pending task has no timeout in Kitaru, so only the backend ends such a Run.
+                await self.executor.cancel(run["run_id"])
+                # The run can have finished before the cancel. Then it gets its score. If not, the
+                # cancel is the cause, also while Kitaru still shows the run as running.
+                kitaru_run = await self.executor.poll(run["run_id"])
+                stopped_at_deadline = kitaru_run["status"] not in FINISHED_RUN_STATUSES
+            evidence = await self.executor.fetch_results(run["run_id"])
         except RunGone:
             # A recorded run that is gone is an incomplete Run. It counts toward two in a row.
             result = self.missing_result(run)
         else:
-            if kitaru_run["status"] not in TERMINAL_RUN_STATUSES:
-                return False
-            evidence = await self.executor.fetch_results(run["run_id"])
             result = loop_rules.score_run(state, kitaru_run, evidence.replays, evidence.evaluations, evidence.sessions)
+            if stopped_at_deadline:
+                # The run is not completed, so the score is already `incomplete`.
+                result["run_error"] = self.deadline_reason(run)
+        # The `worker_id` check of the Run (sc-486) goes here. It can change the result to `incomplete`,
+        # and it must read the tasks before the workers are deleted.
         after = copy.deepcopy(state)
         after["experiments"][-1]["runs"][-1]["result"] = result
         needs_change = loop_rules.decide(self.config, after)["action"] == "needs_change"
         collected = await to_thread(self.store.collect_run, self.owner, self.loop_id, experiment["number"], run["number"],
                                     result, self.now, needs_change=needs_change)
-        if collected and await self.load():
-            await self.publish()
+        if collected:
+            await self.delete_workers()
+            if await self.load():
+                await self.publish()
         return collected
+
+    @staticmethod
+    def deadline_reason(run: dict) -> str:
+        minutes = round((run["deadline_at"] - (run["start_sent_at"] or run["submit_started_at"])).total_seconds() / 60)
+        return f"The Run passed its deadline of {max(minutes, 1)} minutes."
 
     def missing_result(self, run: dict) -> dict:
         members = sorted(self.loop["preflight"]["members"])
@@ -281,10 +417,16 @@ class _Step:
 
     async def end(self, stop: str, reason: str | None, experiment: int | None = None) -> None:
         ending = loop_rules.end_state(stop, experiment)
+        # The store can hold a run ID that this call recorded after it read the Loop.
+        if not await self.load():
+            return
+        await self.stop_open_run()
         ended = await to_thread(self.store.transition, self.owner, self.loop_id, ("running",),
                                 ending["status"], ending["outcome"], reason)
         if ended:
             await self.load()
+            # No Run of an ended Loop is open, so each worker that is left goes.
+            await self.delete_workers()
             await self.publish(ended=stop, reason=reason)
 
     async def publish(self, *, ended: str | None = None, reason: str | None = None) -> None:

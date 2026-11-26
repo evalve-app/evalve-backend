@@ -353,7 +353,9 @@ async def loop_status(loop_id: str, caller: SignedIn, store: LoopStore, steps: S
     The wait limit applies to the two types of credential.
     """
     loop = await _load(store, loop_id)
-    if loop["owner_account_id"] == caller.id and loop["status"] == "running":
+    owned = loop["owner_account_id"] == caller.id
+    moved = False
+    if owned and loop["status"] == "running":
         decision = _choose(loop, now=datetime.now(timezone.utc))
         if decision["action"] == "stop_idle":
             await _expire(store, loop, decision)
@@ -362,6 +364,10 @@ async def loop_status(loop_id: str, caller: SignedIn, store: LoopStore, steps: S
             move = steps.advance if can_drive(caller, loop) else steps.refresh
             await _step(move(caller.id, loop_id, caller.credential))
             loop = await _load(store, loop_id)
+            moved = True
+    if owned and steps is not None and not moved:
+        # A drive or a refresh also does this. It changes nothing that the status shows.
+        await _step(steps.delete_workers(caller.id, loop_id, caller.credential))
     return await _detail(store, loop)
 
 

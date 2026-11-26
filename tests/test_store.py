@@ -16,7 +16,7 @@ from psycopg.errors import CheckViolation
 
 from evalve_backend import database, loop_rules, migrations
 from evalve_backend.__main__ import main
-from evalve_backend.store import LoopStart, PostgresStore, RunPlan, StartResult, PollResult
+from evalve_backend.store import LoopStart, PostgresStore, RunPlan, RunWorker, StartResult, PollResult
 from helpers import create_database, settings
 from memory_store import MemoryStore
 
@@ -329,6 +329,70 @@ class StoreContract:
         self.open_run(loop_id, deadline=None)
         self.assertEqual(self.poll(loop_id), PollResult())
 
+    # The workers of a Run.
+
+    def worker(self, number: int, expires=DEADLINE) -> RunWorker:
+        return RunWorker(f"job-{number}", f"worker-{number}", f"token-{number}", expires)
+
+    def test_a_worker_is_stored_for_a_job_of_an_open_run_one_time(self):
+        loop_id = self.start()
+        # The Run has no Kitaru ID yet, so it has no job.
+        self.assertFalse(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(1)))
+        self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
+        self.assertFalse(self.store.add_run_worker("account-2", loop_id, 0, 1, self.worker(1)))
+        self.assertTrue(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(1)))
+        self.assertFalse(self.store.add_run_worker(OWNER, loop_id, 0, 1, RunWorker("job-1", "worker-9", "token-9", DEADLINE)))
+        self.assertEqual(self.store.run_workers(OWNER, loop_id, 0, 1), [{
+            "job_id": "job-1", "worker_id": "worker-1", "has_token": True, "token_expires_at": DEADLINE,
+            "worker_deleted_at": None,
+        }])
+        self.assertEqual(self.store.run_workers("account-2", loop_id, 0, 1), [])
+        self.assertNotIn("token-1", repr(self.worker(1)))
+
+    def test_the_deadline_of_a_run_is_the_expiry_of_its_first_worker(self):
+        loop_id = self.start()
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
+        self.assertIsNone(self.store.get_loop(OWNER, loop_id)["experiments"][0]["runs"][0]["deadline_at"])
+        self.assertTrue(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(2)))
+        later = DEADLINE + timedelta(minutes=5)
+        self.assertTrue(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(1, later)))
+        self.assertFalse(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(1, DEADLINE - timedelta(minutes=5))))
+        self.assertEqual(self.store.get_loop(OWNER, loop_id)["experiments"][0]["runs"][0]["deadline_at"], DEADLINE)
+        poll = self.poll(loop_id)
+        self.assertEqual((poll.run_deadline, poll.assignments), (DEADLINE, ASSIGNMENTS))
+
+    def test_a_collect_erases_the_tokens_and_makes_the_workers_of_the_run_ready_to_delete(self):
+        loop_id = self.start()
+        self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
+        for number in (2, 1):
+            self.assertTrue(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(number)))
+        # The Run is open, so it needs its workers.
+        self.assertEqual(self.store.workers_to_delete(OWNER, loop_id), [])
+        self.assertTrue(self.store.collect_run(OWNER, loop_id, 0, 1, GREEN, COLLECTED, needs_change=False))
+        self.assertEqual([row["has_token"] for row in self.store.run_workers(OWNER, loop_id, 0, 1)], [False, False])
+        self.assertFalse(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(3)))
+        self.assertEqual(self.store.workers_to_delete("account-2", loop_id), [])
+        self.assertEqual(self.store.workers_to_delete(OWNER, loop_id), [
+            {"experiment_number": 0, "run_number": 1, "job_id": "job-1", "worker_id": "worker-1"},
+            {"experiment_number": 0, "run_number": 1, "job_id": "job-2", "worker_id": "worker-2"},
+        ])
+        self.assertFalse(self.store.record_worker_deleted("account-2", loop_id, 0, 1, "job-1", POLLED))
+        self.assertTrue(self.store.record_worker_deleted(OWNER, loop_id, 0, 1, "job-1", POLLED))
+        self.assertFalse(self.store.record_worker_deleted(OWNER, loop_id, 0, 1, "job-1", DEADLINE))
+        self.assertEqual([row["worker_deleted_at"] for row in self.store.run_workers(OWNER, loop_id, 0, 1)], [POLLED, None])
+        self.assertEqual([row["job_id"] for row in self.store.workers_to_delete(OWNER, loop_id)], ["job-2"])
+
+    def test_the_end_of_a_loop_erases_the_tokens_and_makes_each_worker_ready_to_delete(self):
+        loop_id = self.start()
+        self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
+        self.assertTrue(self.store.add_run_worker(OWNER, loop_id, 0, 1, self.worker(1)))
+        self.assertTrue(self.store.transition(OWNER, loop_id, ("running",), "cancelled", "stopped_by_user"))
+        self.assertEqual([row["has_token"] for row in self.store.run_workers(OWNER, loop_id, 0, 1)], [False])
+        self.assertEqual([row["job_id"] for row in self.store.workers_to_delete(OWNER, loop_id)], ["job-1"])
+        self.assertTrue(self.store.record_worker_deleted(OWNER, loop_id, 0, 1, "job-1", POLLED))
+        self.assertEqual(self.store.workers_to_delete(OWNER, loop_id), [])
+
 
 class MemoryStoreTest(StoreContract, unittest.TestCase):
     def setUp(self):
@@ -363,7 +427,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
         return psycopg.connect(**database.connection_options(self.settings, self.settings.db_name))
 
     def seed_assignments(self, loop_id, experiment, run, deadline, workers):
-        # The story for the workers of a Run adds the store function that writes these rows.
+        # Rows that `add_run_worker` does not permit, for example a worker with no token.
         with self.connect() as connection:
             connection.execute("""
                 UPDATE runs SET deadline_at = %s WHERE loop_id = %s AND experiment_number = %s AND number = %s
@@ -493,10 +557,11 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
         with patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS[:3]):
             self.assertEqual(migrations.migrate(self.settings), (1, 2, 3))
         loop_id = self.start()
-        self.collect_control(loop_id)
-        before = self.store.get_loop(OWNER, loop_id)
         self.assertEqual(migrations.migrate(self.settings), (4,))
-        self.assertEqual(self.store.get_loop(OWNER, loop_id), before)
+        # The store reads and writes the new tables, so it reads the Loop only after the migration.
+        self.assertIsNone(self.store.get_loop(OWNER, loop_id)["experiments"][0]["runs"][0]["deadline_at"])
+        self.collect_control(loop_id)
+        self.assertEqual(self.store.get_loop(OWNER, loop_id)["experiments"][0]["runs"][0]["result"]["outcome"], "red")
         self.assertIsNone(self.store.get_run(OWNER, loop_id, 0, 1)["deadline_at"])
         with self.connect() as connection:
             for table in ("loop_tasks", "run_workers"):

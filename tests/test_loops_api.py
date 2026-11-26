@@ -95,6 +95,9 @@ class FakeSteps:
         authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("advance", owner, authorization))
 
+    async def delete_workers(self, owner, loop_id, credential):
+        pass
+
     async def refresh(self, owner, loop_id, credential):
         authorization = credential.headers.get("Authorization") or dict(credential.headers)
         self.calls.append(("refresh", owner, authorization))

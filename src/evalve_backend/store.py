@@ -63,6 +63,16 @@ class PollResult:
     assignments: tuple[dict, ...] = field(default=(), repr=False)
 
 
+@dataclass(frozen=True)
+class RunWorker:
+    """The Kitaru worker that the backend registered for one job of a Run. The token never goes into a repr."""
+
+    job_id: str
+    worker_id: str
+    token: str = field(repr=False)
+    token_expires_at: datetime
+
+
 # The states in which the secret of a Loop task is valid, and the states that end it.
 LIVE_TASK_STATES = ("starting", "alive")
 ENDED_TASK_STATES = ("exited", "stopped", "failed_start")
@@ -109,9 +119,36 @@ class Store(Protocol):
     def record_start_sent(self, owner: str, loop_id: str, experiment: int, run: int, sent_at: datetime) -> bool: ...
     def record_run_id(self, owner: str, loop_id: str, experiment: int, run: int, kitaru_id: str) -> bool: ...
     def collect_run(self, owner: str, loop_id: str, experiment: int, run: int, result: dict,
-                    collected_at: datetime, *, needs_change: bool) -> bool: ...
+                    collected_at: datetime, *, needs_change: bool) -> bool:
+        """Store the result of a Run and erase the worker tokens of the Run, in one transaction."""
+        ...
+
     def transition(self, owner: str, loop_id: str, from_statuses: tuple[str, ...], to_status: str,
-                   outcome: str, reason: str | None = None) -> bool: ...
+                   outcome: str, reason: str | None = None) -> bool:
+        """End a running Loop and erase each worker token of the Loop, in one transaction."""
+        ...
+
+    def add_run_worker(self, owner: str, loop_id: str, experiment: int, run: int, worker: RunWorker) -> bool:
+        """Store the worker of one job of an open Run of a running Loop. False when the job has a worker.
+
+        The expiry of the first worker of the Run becomes the deadline of the Run, one time.
+        """
+        ...
+
+    def run_workers(self, owner: str, loop_id: str, experiment: int, run: int) -> list[dict]:
+        """The workers of a Run, in the order of the job IDs: `job_id`, `worker_id`, `token_expires_at`,
+        `worker_deleted_at`, and `has_token` in place of the token."""
+        ...
+
+    def workers_to_delete(self, owner: str, loop_id: str) -> list[dict]:
+        """The workers of a Loop that are still in Kitaru and that no Run needs: those of each
+        collected Run, and each worker when the Loop is not running. No row has a token."""
+        ...
+
+    def record_worker_deleted(self, owner: str, loop_id: str, experiment: int, run: int, job_id: str,
+                              deleted_at: datetime) -> bool:
+        """Record that the worker of a job is gone from Kitaru, and erase its token."""
+        ...
 
     def add_loop_task(self, owner: str, loop_id: str, secret_hash: str, *,
                       experiment: int | None = None, run: int | None = None) -> int | None:
@@ -325,7 +362,7 @@ class PostgresStore:
             by_loop[loop_id]["experiments"].append(experiment)
         for run in connection.execute("""
             SELECT loop_id, experiment_number, number, estimated_cost_usd, cohort_version_id,
-                   agent_version_id, submit_started_at, start_sent_at, run_id, result, collected_at
+                   agent_version_id, submit_started_at, start_sent_at, run_id, result, collected_at, deadline_at
             FROM runs WHERE loop_id = ANY(%s) ORDER BY loop_id, experiment_number, number
         """, (ids,)):
             experiments[run.pop("loop_id"), run.pop("experiment_number")]["runs"].append(run)
@@ -460,6 +497,10 @@ class PostgresStore:
                 connection.execute("""
                     UPDATE loops SET waiting_since = %s, updated_at = now() WHERE id = %s
                 """, (collected_at if needs_change else None, loop_id))
+                connection.execute("""
+                    UPDATE run_workers SET worker_token = NULL
+                    WHERE loop_id = %s AND experiment_number = %s AND run_number = %s
+                """, (loop_id, experiment, run))
             return updated
 
     def transition(self, owner: str, loop_id: str, from_statuses: tuple[str, ...], to_status: str,
@@ -467,11 +508,73 @@ class PostgresStore:
         """Commit the terminal pair if the Loop is still at an expected status."""
         validate_transition(to_status, outcome)
         with self._connect() as connection:
-            return connection.execute("""
+            ended = connection.execute("""
                 UPDATE loops SET status = %s, outcome = %s, reason = %s,
                                  waiting_since = NULL, pending_change = NULL, updated_at = now()
                 WHERE id = %s AND owner_account_id = %s AND status = 'running' AND status = ANY(%s)
             """, (to_status, outcome, reason, loop_id, owner, list(from_statuses))).rowcount == 1
+            if ended:
+                # No Run of an ended Loop is open, so no Loop task needs a token.
+                connection.execute("UPDATE run_workers SET worker_token = NULL WHERE loop_id = %s", (loop_id,))
+            return ended
+
+    def add_run_worker(self, owner: str, loop_id: str, experiment: int, run: int, worker: RunWorker) -> bool:
+        with self._connect() as connection:
+            if _lock_running_loop(connection, owner, loop_id) is None:
+                return False
+            run_key = (loop_id, experiment, run)
+            is_open = connection.execute("""
+                SELECT 1 FROM runs
+                WHERE loop_id = %s AND experiment_number = %s AND number = %s
+                  AND run_id IS NOT NULL AND collected_at IS NULL
+            """, run_key).fetchone() is not None
+            if not is_open:
+                return False
+            added = connection.execute("""
+                INSERT INTO run_workers (loop_id, experiment_number, run_number, job_id,
+                                         worker_id, worker_token, token_expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (*run_key, worker.job_id, worker.worker_id, worker.token, worker.token_expires_at)).rowcount == 1
+            if added:
+                connection.execute("""
+                    UPDATE runs SET deadline_at = coalesce(deadline_at, %s)
+                    WHERE loop_id = %s AND experiment_number = %s AND number = %s
+                """, (worker.token_expires_at, *run_key))
+            return added
+
+    def run_workers(self, owner: str, loop_id: str, experiment: int, run: int) -> list[dict]:
+        with self._connect() as connection:
+            return connection.execute("""
+                SELECT job_id, worker_id, worker_token IS NOT NULL AS has_token, token_expires_at, worker_deleted_at
+                FROM run_workers JOIN loops ON loops.id = run_workers.loop_id
+                WHERE loops.owner_account_id = %s AND loop_id = %s AND experiment_number = %s AND run_number = %s
+                ORDER BY job_id
+            """, (owner, loop_id, experiment, run)).fetchall()
+
+    def workers_to_delete(self, owner: str, loop_id: str) -> list[dict]:
+        with self._connect() as connection:
+            return connection.execute("""
+                SELECT workers.experiment_number, workers.run_number, workers.job_id, workers.worker_id
+                FROM run_workers AS workers
+                JOIN loops ON loops.id = workers.loop_id
+                JOIN runs ON runs.loop_id = workers.loop_id AND runs.experiment_number = workers.experiment_number
+                    AND runs.number = workers.run_number
+                WHERE loops.owner_account_id = %s AND workers.loop_id = %s
+                  AND workers.worker_id IS NOT NULL AND workers.worker_deleted_at IS NULL
+                  AND (runs.collected_at IS NOT NULL OR loops.status <> 'running')
+                ORDER BY workers.experiment_number, workers.run_number, workers.job_id
+            """, (owner, loop_id)).fetchall()
+
+    def record_worker_deleted(self, owner: str, loop_id: str, experiment: int, run: int, job_id: str,
+                              deleted_at: datetime) -> bool:
+        with self._connect() as connection:
+            return connection.execute("""
+                UPDATE run_workers SET worker_deleted_at = %s, worker_token = NULL
+                FROM loops
+                WHERE loops.id = run_workers.loop_id AND loops.owner_account_id = %s AND loop_id = %s
+                  AND experiment_number = %s AND run_number = %s AND job_id = %s AND worker_deleted_at IS NULL
+            """, (deleted_at, owner, loop_id, experiment, run, job_id)).rowcount == 1
 
     def add_loop_task(self, owner: str, loop_id: str, secret_hash: str, *,
                       experiment: int | None = None, run: int | None = None) -> int | None:
