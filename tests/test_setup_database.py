@@ -358,7 +358,7 @@ class RealDatabaseTest(unittest.TestCase):
             ensure_role(connection, self.settings)
             ensure_database(connection, self.settings)
         with self.admin(self.settings.db_name) as connection:
-            self.assertEqual(transfer_objects(connection, self.settings), ["made the role the owner of 4 objects"])
+            self.assertEqual(transfer_objects(connection, self.settings), ["made the role the owner of 6 objects"])
             self.assertEqual(transfer_objects(connection, self.settings), [])
         self.assertEqual(self.objects_not_owned_by_the_role(), [])
 

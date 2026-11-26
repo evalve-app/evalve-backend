@@ -17,7 +17,7 @@ from psycopg.errors import CheckViolation
 from evalve_backend import database, loop_rules, migrations
 from evalve_backend.__main__ import main
 from evalve_backend.store import LoopStart, PostgresStore, RunPlan, StartResult, PollResult
-from helpers import settings
+from helpers import create_database, settings
 from memory_store import MemoryStore
 
 OWNER = "account-1"
@@ -489,7 +489,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
 
     def test_loop_task_tables_arrive_on_a_database_that_holds_loops(self):
         self.drop_database()
-        database.ensure_database(self.settings)
+        create_database(self.settings)
         with patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS[:3]):
             self.assertEqual(migrations.migrate(self.settings), (1, 2, 3))
         loop_id = self.start()
