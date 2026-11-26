@@ -16,7 +16,7 @@ from psycopg.errors import CheckViolation
 
 from evalve_backend import database, loop_rules, migrations
 from evalve_backend.__main__ import main
-from evalve_backend.store import LoopStart, PostgresStore, RunPlan, StartResult
+from evalve_backend.store import LoopStart, PostgresStore, RunPlan, StartResult, PollResult
 from helpers import settings
 from memory_store import MemoryStore
 
@@ -35,6 +35,15 @@ RED = {
     "cost_incomplete": False, "rows": [{"case": "case-1", "passed": False}],
 }
 GREEN = {**RED, "outcome": "green", "rows": [{"case": "case-1", "passed": True}]}
+SECRET_HASH = "a" * 64
+POLLED = COLLECTED + timedelta(minutes=1)
+DEADLINE = STARTED + timedelta(hours=1)
+# The third job has no token, so it is not an Assignment.
+WORKERS = [("job-1", "worker-1", "token-1"), ("job-2", "worker-2", "token-2"), ("job-3", "worker-3", None)]
+ASSIGNMENTS = (
+    {"run_id": "kitaru-run-1", "job_id": "job-1", "worker_id": "worker-1", "worker_token": "token-1"},
+    {"run_id": "kitaru-run-1", "job_id": "job-2", "worker_id": "worker-2", "worker_token": "token-2"},
+)
 
 
 def race(*actions):
@@ -201,10 +210,132 @@ class StoreContract:
         self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
         self.assertFalse(self.store.record_start_sent(OWNER, loop_id, 0, 1, COLLECTED))
 
+    def poll(self, loop_id, secret_hash=SECRET_HASH, *, at=POLLED, version=1, **options):
+        return self.store.record_poll(loop_id, secret_hash, version, at, **options)
+
+    def open_run(self, loop_id, deadline=DEADLINE):
+        self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
+        self.seed_assignments(loop_id, 0, 1, deadline, WORKERS)
+
+    def test_a_loop_task_gets_the_next_attempt_of_its_loop(self):
+        loop_id = self.start()
+        self.assertIsNone(self.store.latest_loop_task(loop_id))
+        self.assertIsNone(self.store.add_loop_task("account-2", loop_id, SECRET_HASH))
+        self.assertEqual(self.store.add_loop_task(OWNER, loop_id, SECRET_HASH), 1)
+        task = self.store.latest_loop_task(loop_id)
+        self.assertEqual(
+            (task["attempt"], task["secret_hash"], task["state"], task["experiment_number"], task["run_number"]),
+            (1, SECRET_HASH, "starting", None, None))
+        for empty in ("task_arn", "task_definition_arn", "first_poll_at", "last_poll_at", "contract_version",
+                      "stop_reason"):
+            self.assertIsNone(task[empty], empty)
+        self.assertIsNotNone(task["created_at"])
+        self.assertEqual(self.store.add_loop_task(OWNER, loop_id, "b" * 64, experiment=0, run=1), 2)
+        task = self.store.latest_loop_task(loop_id)
+        self.assertEqual((task["attempt"], task["experiment_number"], task["run_number"]), (2, 0, 1))
+        self.assertTrue(self.store.transition(OWNER, loop_id, ("running",), "cancelled", "stopped_by_user"))
+        self.assertIsNone(self.store.add_loop_task(OWNER, loop_id, "c" * 64))
+
+    def test_a_good_poll_makes_the_loop_task_alive_and_records_its_times(self):
+        loop_id = self.start()
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        self.assertEqual(self.poll(loop_id), PollResult())
+        task = self.store.latest_loop_task(loop_id)
+        self.assertEqual((task["state"], task["first_poll_at"], task["last_poll_at"], task["contract_version"]),
+                         ("alive", POLLED, POLLED, 1))
+        later = POLLED + timedelta(seconds=10)
+        self.assertEqual(self.poll(loop_id, at=later), PollResult())
+        task = self.store.latest_loop_task(loop_id)
+        self.assertEqual((task["state"], task["first_poll_at"], task["last_poll_at"]), ("alive", POLLED, later))
+
+    def test_only_the_secret_of_the_newest_loop_task_is_accepted(self):
+        loop_id = self.start()
+        self.assertFalse(self.store.accepts_loop_task(loop_id, SECRET_HASH))
+        self.assertIsNone(self.poll(loop_id))
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        self.assertTrue(self.store.accepts_loop_task(loop_id, SECRET_HASH))
+        self.assertFalse(self.store.accepts_loop_task(loop_id, "b" * 64))
+        self.assertFalse(self.store.accepts_loop_task("no-such-loop", SECRET_HASH))
+        self.assertIsNone(self.poll(loop_id, "b" * 64))
+        self.assertIsNone(self.poll("no-such-loop"))
+        self.assertEqual(self.store.latest_loop_task(loop_id)["state"], "starting")
+        self.store.add_loop_task(OWNER, loop_id, "b" * 64)
+        self.assertFalse(self.store.accepts_loop_task(loop_id, SECRET_HASH))
+        self.assertIsNone(self.poll(loop_id))
+        self.assertEqual(self.poll(loop_id, "b" * 64), PollResult())
+
+    def test_the_last_poll_ends_the_secret(self):
+        loop_id = self.start()
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        self.open_run(loop_id)
+        self.assertEqual(self.poll(loop_id, last=True), PollResult())
+        task = self.store.latest_loop_task(loop_id)
+        self.assertEqual((task["state"], task["last_poll_at"]), ("exited", POLLED))
+        self.assertFalse(self.store.accepts_loop_task(loop_id, SECRET_HASH))
+        self.assertIsNone(self.poll(loop_id))
+
+    def test_an_ended_loop_task_and_an_ended_loop_refuse_the_secret(self):
+        loop_id = self.start()
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        with self.assertRaises(ValueError):
+            self.store.end_loop_task(loop_id, 1, "alive")
+        self.assertFalse(self.store.end_loop_task(loop_id, 2, "stopped"))
+        self.assertTrue(self.store.end_loop_task(loop_id, 1, "stopped", "The Loop ended."))
+        self.assertFalse(self.store.end_loop_task(loop_id, 1, "exited"))
+        task = self.store.latest_loop_task(loop_id)
+        self.assertEqual((task["state"], task["stop_reason"]), ("stopped", "The Loop ended."))
+        self.assertIsNone(self.poll(loop_id))
+
+        self.store.add_loop_task(OWNER, loop_id, "b" * 64)
+        self.assertTrue(self.store.transition(OWNER, loop_id, ("running",), "completed", "max_runs"))
+        self.assertFalse(self.store.accepts_loop_task(loop_id, "b" * 64))
+        self.assertIsNone(self.poll(loop_id, "b" * 64))
+        self.assertEqual(self.store.latest_loop_task(loop_id)["state"], "starting")
+
+    def test_a_refused_contract_version_is_a_failed_start_with_its_reason(self):
+        loop_id = self.start()
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        self.open_run(loop_id)
+        self.assertIsNone(self.poll(loop_id, "b" * 64, version=7, refused_reason="Version 7 is refused."))
+        self.assertEqual(self.store.latest_loop_task(loop_id)["state"], "starting")
+        self.assertEqual(self.poll(loop_id, version=7, refused_reason="Version 7 is refused."), PollResult())
+        task = self.store.latest_loop_task(loop_id)
+        self.assertEqual((task["state"], task["contract_version"], task["stop_reason"], task["first_poll_at"]),
+                         ("failed_start", 7, "Version 7 is refused.", None))
+        self.assertIsNone(self.poll(loop_id))
+
+    def test_a_poll_reads_the_assignments_of_the_open_run(self):
+        loop_id = self.start()
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        self.seed_assignments(loop_id, 0, 1, DEADLINE, WORKERS)
+        # The Run has no Kitaru ID yet, so it is not open.
+        self.assertEqual(self.poll(loop_id), PollResult())
+        self.assertTrue(self.store.record_run_id(OWNER, loop_id, 0, 1, "kitaru-run-1"))
+        first = self.poll(loop_id)
+        self.assertEqual((first.run_deadline, first.assignments), (DEADLINE, ASSIGNMENTS))
+        # The poll reads state. It is not a queue.
+        self.assertEqual(self.poll(loop_id, at=POLLED + timedelta(seconds=5)), first)
+        self.assertNotIn("token-1", repr(first))
+        self.assertEqual(self.poll(loop_id, at=DEADLINE), PollResult())
+        self.assertEqual(self.poll(loop_id), first)
+        self.assertTrue(self.store.collect_run(OWNER, loop_id, 0, 1, GREEN, COLLECTED, needs_change=False))
+        self.assertEqual(self.poll(loop_id), PollResult())
+        self.assertTrue(self.store.add_run(OWNER, loop_id, 0, 2, PLAN))
+        self.assertEqual(self.poll(loop_id), PollResult())
+
+    def test_an_open_run_with_no_deadline_gives_no_assignment(self):
+        loop_id = self.start()
+        self.store.add_loop_task(OWNER, loop_id, SECRET_HASH)
+        self.open_run(loop_id, deadline=None)
+        self.assertEqual(self.poll(loop_id), PollResult())
+
 
 class MemoryStoreTest(StoreContract, unittest.TestCase):
     def setUp(self):
         self.store = MemoryStore()
+
+    def seed_assignments(self, *run):
+        self.store.seed_assignments(*run)
 
 
 @unittest.skipUnless(os.environ.get("EVALVE_TEST_DB_HOST"), "set EVALVE_TEST_DB_HOST to test against PostgreSQL")
@@ -230,6 +361,18 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
 
     def connect(self):
         return psycopg.connect(**database.connection_options(self.settings, self.settings.db_name))
+
+    def seed_assignments(self, loop_id, experiment, run, deadline, workers):
+        # The story for the workers of a Run adds the store function that writes these rows.
+        with self.connect() as connection:
+            connection.execute("""
+                UPDATE runs SET deadline_at = %s WHERE loop_id = %s AND experiment_number = %s AND number = %s
+            """, (deadline, loop_id, experiment, run))
+            for job_id, worker_id, token in workers:
+                connection.execute("""
+                    INSERT INTO run_workers (loop_id, experiment_number, run_number, job_id, worker_id, worker_token)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (loop_id, experiment, run, job_id, worker_id, token))
 
     def test_reopened_store_recovers_experiments_and_runs(self):
         loop_id = self.start()
@@ -319,10 +462,10 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
             connection.execute("CREATE TABLE evalve_loops (slug text PRIMARY KEY)")
             connection.execute("INSERT INTO evalve_loops VALUES ('pilot')")
         results = race(lambda: migrations.migrate(self.settings), lambda: migrations.migrate(self.settings))
-        self.assertCountEqual(results, [(1, 2, 3), ()])
+        self.assertCountEqual(results, [(1, 2, 3, 4), ()])
         with self.connect() as connection:
             versions = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-            self.assertEqual(versions, [(1,), (2,), (3,)])
+            self.assertEqual(versions, [(1,), (2,), (3,), (4,)])
             self.assertEqual(connection.execute("SELECT slug FROM evalve_loops").fetchone(), ("pilot",))
 
     def test_upgrade_indexes_existing_loops_across_owners(self):
@@ -334,7 +477,7 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
         other = self.store.start_loop(
             replace(START, owner_account_id="account-2", slug="other"), PLAN,
         )
-        self.assertEqual(migrations.migrate(self.settings), (2, 3))
+        self.assertEqual(migrations.migrate(self.settings), (2, 3, 4))
         self.assertEqual(migrations.migrate(self.settings), ())
         with self.connect() as connection:
             index, = connection.execute("SELECT pg_get_indexdef('loops_created'::regclass)").fetchone()
@@ -343,6 +486,21 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
         self.assertEqual(first["loop_id"], other.loop_id)
         second, = self.store.list_loops(None, limit=1, before=(first["created_at"], first["loop_id"]))
         self.assertEqual(second["loop_id"], loop_id)
+
+    def test_loop_task_tables_arrive_on_a_database_that_holds_loops(self):
+        self.drop_database()
+        database.ensure_database(self.settings)
+        with patch.object(migrations, "MIGRATIONS", migrations.MIGRATIONS[:3]):
+            self.assertEqual(migrations.migrate(self.settings), (1, 2, 3))
+        loop_id = self.start()
+        self.collect_control(loop_id)
+        before = self.store.get_loop(OWNER, loop_id)
+        self.assertEqual(migrations.migrate(self.settings), (4,))
+        self.assertEqual(self.store.get_loop(OWNER, loop_id), before)
+        self.assertIsNone(self.store.get_run(OWNER, loop_id, 0, 1)["deadline_at"])
+        with self.connect() as connection:
+            for table in ("loop_tasks", "run_workers"):
+                self.assertEqual(connection.execute(f"SELECT count(*) FROM {table}").fetchone(), (0,))
 
     def test_migration_failure_rolls_back_schema_and_stops_startup(self):
         self.drop_database()

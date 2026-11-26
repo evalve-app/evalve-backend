@@ -12,6 +12,7 @@ Every route sits under `/evalve`, so one hostname can serve Kitaru and Evalve.
 | --- | --- | --- |
 | `GET /evalve/health` | None | `200` with `"database": "ok"` when the backend can query its database. `503` when it can't. Both include `version` and `image`, so a deployment can confirm which build is serving. |
 | `GET /evalve/v1/me` | Kitaru credential or dashboard session | `200 {"id": "...", "name": "..."}` for the Kitaru account behind the credential. |
+| `POST /evalve/v1/loops/{loop_id}/task/poll` | Secret of the Loop task | The Assignments of the open Run of the Loop, for the Supervisor in the Loop task. See [The secret of a Loop task](#the-secret-of-a-loop-task). |
 
 The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the account that started a Loop can propose, cancel, or advance it. A status read by another account returns stored results.
 
@@ -119,6 +120,21 @@ The backend passes the credential to `GET /api/v1/accounts/me` on the Kitaru ser
 - **Both ways have the same rights.** No route treats a dashboard session differently from a key.
 
 The browser sends the cookie only to the host that set it. So the dashboard must reach the backend on its own host: `evalve-deploy` sends `/evalve/*` on `dashboard.<hostname>` to the backend. A session lasts 1 hour, and Kitaru does not renew it.
+
+### The secret of a Loop task
+
+One route has a third credential. The Supervisor in a Loop task polls `POST /evalve/v1/loops/{loop_id}/task/poll` for its Assignments and shows the secret of its Loop task:
+
+```
+Authorization: EvalveLoopTask <secret>
+```
+
+- **Only this route accepts the secret,** and it gives the Assignments of its own Loop only. Each other route answers `401`. A Kitaru credential and a dashboard session get `401` on this route.
+- **The route makes no call to Kitaru.** It checks the secret against the hash that the backend stores. The backend never stores or logs the secret.
+- **Only the newest Loop task of a running Loop has a valid secret,** while its state is `starting` or `alive`. A refused poll gets `401` with no reason.
+- **A poll reads state.** The reply has each Assignment of the open Run (`run_id`, `job_id`, `worker_id`, `worker_token`) and `run_deadline`. A second poll gets the same Assignments. The list is empty when no Run is open or the deadline is past.
+- **A poll with `"last": true` ends the secret.**
+- **A contract version that the backend does not support gets `409`,** and the Loop task becomes a failed start. The backend supports the versions from `MIN_CONTRACT_VERSION` to `MAX_CONTRACT_VERSION` (1 and 1).
 
 ## Settings
 

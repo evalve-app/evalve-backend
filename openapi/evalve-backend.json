@@ -32,6 +32,34 @@
         "title": "ApiError",
         "type": "object"
       },
+      "Assignment": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "worker_id": {
+            "title": "Worker Id",
+            "type": "string"
+          },
+          "worker_token": {
+            "title": "Worker Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "job_id",
+          "worker_id",
+          "worker_token"
+        ],
+        "title": "Assignment",
+        "type": "object"
+      },
       "CaseEvidence": {
         "properties": {
           "baseline_session_id": {
@@ -1506,6 +1534,56 @@
         "title": "StartLoop",
         "type": "object"
       },
+      "TaskPoll": {
+        "description": "The poll of a Supervisor. A later contract version can add a field, and the backend must\nthen refuse the version, not the body. Thus this body permits fields that it does not know.",
+        "properties": {
+          "contract_version": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Contract Version",
+            "type": "integer"
+          },
+          "last": {
+            "default": false,
+            "title": "Last",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "contract_version"
+        ],
+        "title": "TaskPoll",
+        "type": "object"
+      },
+      "TaskPollReply": {
+        "properties": {
+          "assignments": {
+            "items": {
+              "$ref": "#/components/schemas/Assignment"
+            },
+            "title": "Assignments",
+            "type": "array"
+          },
+          "run_deadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Deadline"
+          }
+        },
+        "required": [
+          "run_deadline",
+          "assignments"
+        ],
+        "title": "TaskPollReply",
+        "type": "object"
+      },
       "ToolPolicy": {
         "additionalProperties": false,
         "properties": {
@@ -1581,6 +1659,12 @@
       "HTTPBearer": {
         "scheme": "bearer",
         "type": "http"
+      },
+      "LoopTaskSecret": {
+        "description": "The secret of the Loop task, as `EvalveLoopTask <secret>`. Only the route for the Assignments of a Loop task accepts it.",
+        "in": "header",
+        "name": "Authorization",
+        "type": "apiKey"
       },
       "SessionCookie": {
         "description": "The dashboard session cookie of Kitaru. A deployment can change the name with EVALVE_SESSION_COOKIE_NAME, and an empty name turns this way to sign in off.",
@@ -2324,6 +2408,84 @@
         "summary": "Final Report",
         "tags": [
           "Loops"
+        ]
+      }
+    },
+    "/evalve/v1/loops/{loop_id}/task/poll": {
+      "post": {
+        "description": "The Assignments of the open Run of the Loop, for the Supervisor in the Loop task of the Loop.\n\nThe poll reads state: a second poll gets the same Assignments. `run_deadline` is the timeout of\neach worker process. A poll with `last` set to true ends the secret of the Loop task.",
+        "operationId": "poll_loop_task_evalve_v1_loops__loop_id__task_poll_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "loop_id",
+            "required": true,
+            "schema": {
+              "title": "Loop Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskPoll"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskPollReply"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "LoopTaskSecret": []
+          }
+        ],
+        "summary": "Poll Loop Task",
+        "tags": [
+          "Loop tasks"
         ]
       }
     },

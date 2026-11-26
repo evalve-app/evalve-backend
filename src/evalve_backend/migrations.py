@@ -82,6 +82,47 @@ MIGRATIONS = (
     (3, """
         ALTER TABLE runs ADD COLUMN start_sent_at timestamptz;
     """),
+    # One row for each Loop task of a Loop, and one row for each job of a Run. The secret of a
+    # Loop task is valid only on the newest row of its Loop, while the state is starting or alive.
+    # The backend stores the hash of the secret, never the secret. It stores the worker tokens of
+    # the open Run in plain form, because a Loop task needs them. The pilot accepts this.
+    (4, """
+        CREATE TABLE loop_tasks (
+            loop_id text NOT NULL REFERENCES loops (id),
+            attempt integer NOT NULL CHECK (attempt > 0),
+            secret_hash text NOT NULL,
+            state text NOT NULL DEFAULT 'starting'
+                CHECK (state IN ('starting', 'alive', 'exited', 'stopped', 'failed_start')),
+            task_arn text,
+            task_definition_arn text,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            first_poll_at timestamptz,
+            last_poll_at timestamptz,
+            contract_version integer,
+            stop_reason text,
+            experiment_number integer,
+            run_number integer,
+            PRIMARY KEY (loop_id, attempt),
+            FOREIGN KEY (loop_id, experiment_number, run_number)
+                REFERENCES runs (loop_id, experiment_number, number)
+        );
+
+        CREATE TABLE run_workers (
+            loop_id text NOT NULL,
+            experiment_number integer NOT NULL,
+            run_number integer NOT NULL,
+            job_id text NOT NULL,
+            worker_id text,
+            worker_token text,
+            token_expires_at timestamptz,
+            worker_deleted_at timestamptz,
+            PRIMARY KEY (loop_id, experiment_number, run_number, job_id),
+            FOREIGN KEY (loop_id, experiment_number, run_number)
+                REFERENCES runs (loop_id, experiment_number, number)
+        );
+
+        ALTER TABLE runs ADD COLUMN deadline_at timestamptz;
+    """),
 )
 
 
