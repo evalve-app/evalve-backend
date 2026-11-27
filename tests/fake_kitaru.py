@@ -152,11 +152,10 @@ class FakeKitaru:
         worker_of = {worker["scope"].get("job_id"): worker_id for worker_id, worker in self.workers.items()}
         for index, baseline_id in enumerate(self.members):
             job_id = jobs[index] if index < len(jobs) else None
-            ran = not (outcome == "incomplete" and index == 1)
-            if job_id is not None:
-                self.add_task(job_id, "agent", "completed" if ran else "failed", worker_of.get(job_id))
-            replay_id, result_id = self._new_id("replay"), self._new_id("session")
             has_result = not (outcome == "incomplete" and index == 1)
+            if job_id is not None:
+                self.add_task(job_id, "agent", "completed" if has_result else "failed", worker_of.get(job_id))
+            replay_id, result_id = self._new_id("replay"), self._new_id("session")
             self.replays[replay_id] = {
                 "id": replay_id, "experiment_run_id": run_id, "baseline_session_id": baseline_id,
                 "result_session_id": result_id if has_result else None,

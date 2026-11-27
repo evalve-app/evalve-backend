@@ -433,8 +433,11 @@ class _Step:
         foreign = 0
         for job in jobs:
             for task in await self.api.list_tasks(job["id"]):
-                if task["kind"] in CHECKED_TASK_KINDS and task["status"] == "completed":
-                    foreign += not task.get("worker_id") or task["worker_id"] != worker_of.get(job["id"])
+                if task["kind"] not in CHECKED_TASK_KINDS or task["status"] != "completed":
+                    continue
+                worker_id = task.get("worker_id")
+                if not worker_id or worker_id != worker_of.get(job["id"]):
+                    foreign += 1
         return foreign
 
     @staticmethod
