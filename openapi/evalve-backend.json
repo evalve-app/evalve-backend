@@ -1116,6 +1116,17 @@
             "title": "Failed",
             "type": "integer"
           },
+          "foreign_tasks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Foreign Tasks"
+          },
           "missing_session_ids": {
             "items": {
               "type": "string"

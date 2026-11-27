@@ -87,6 +87,8 @@ class RunResult(BaseModel):
     run_id: str
     run_status: str
     run_error: str | None = None
+    # The tasks of the Run that a worker outside the Loop ran. Only a Run that failed the `worker_id` check has it.
+    foreign_tasks: int | None = None
     outcome: RunOutcome
     passed: int
     failed: int

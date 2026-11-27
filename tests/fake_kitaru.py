@@ -8,6 +8,9 @@ and other bytes give 422. `expire_keys` stands for the 900 s retention running o
 
 A started run has one job for each cohort member. A registered worker gets a token that expires
 after WORKER_TOKEN_LIFETIME, and a delete answers 204 with no body, as in Kitaru 0.27.6.
+
+A finished run has one agent task for each job and one evaluator task for each verdict. Each task has
+the worker that is registered for its job, or none. The delete of a worker removes it from its tasks.
 """
 
 from __future__ import annotations
@@ -66,6 +69,7 @@ class FakeKitaru:
         self.replays: dict[str, dict] = {}
         self.evaluations: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
+        self.tasks: dict[str, dict] = {}
         # The workers that are registered now, and the token of each worker that was registered.
         self.workers: dict[str, dict] = {}
         self.worker_tokens: dict[str, str] = {}
@@ -126,16 +130,31 @@ class FakeKitaru:
     def _next_number(self, experiment_id: str) -> int:
         return 1 + max((r["number"] for r in self.runs.values() if r["experiment_id"] == experiment_id), default=0)
 
+    def add_task(self, job_id: str, kind: str, status: str = "completed", worker_id: str | None = None) -> dict:
+        """One task of a job, as the task list of Kitaru shows it."""
+        task_id = self._new_id("task")
+        self.tasks[task_id] = {"id": task_id, "job_id": job_id, "kind": kind, "status": status, "worker_id": worker_id}
+        return self.tasks[task_id]
+
     def finish(self, run_id: str, outcome: str = "green", cost: str | None = "0.04") -> None:
         """Complete a run: one replay, result session and verdict per cohort member.
 
         `outcome` is green (every verdict passes), red (the first member fails) or incomplete (the
         run fails before the second member has a result session).
+
+        The worker that is registered for a job ran each task of that job.
         """
         run = self.runs[run_id]
         run["status"] = "failed" if outcome == "incomplete" else "completed"
         experiment = self.experiments[run["experiment_id"]]
+        # A run that someone started outside the backend has no job here, and gets no task.
+        jobs = [job_id for job_id, job in self.jobs.items() if job["experiment_run_id"] == run_id]
+        worker_of = {worker["scope"].get("job_id"): worker_id for worker_id, worker in self.workers.items()}
         for index, baseline_id in enumerate(self.members):
+            job_id = jobs[index] if index < len(jobs) else None
+            ran = not (outcome == "incomplete" and index == 1)
+            if job_id is not None:
+                self.add_task(job_id, "agent", "completed" if ran else "failed", worker_of.get(job_id))
             replay_id, result_id = self._new_id("replay"), self._new_id("session")
             has_result = not (outcome == "incomplete" and index == 1)
             self.replays[replay_id] = {
@@ -156,6 +175,8 @@ class FakeKitaru:
                     "evaluator_version_id": EVALUATOR_VERSION_ID, "evaluator_params": spec.get("params") or {},
                     "passed": not (outcome == "red" and index == 0), "explanation": "checked",
                 }
+                if job_id is not None:
+                    self.add_task(job_id, "evaluator", "completed", worker_of.get(job_id))
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -237,6 +258,7 @@ class FakeKitaru:
             ("GET", r"/api/v1/experiment-runs/([^/]+)/jobs", self._run_jobs),
             ("POST", r"/api/v1/workers", self._register_worker),
             ("DELETE", r"/api/v1/workers/([^/]+)", self._delete_worker),
+            ("GET", r"/api/v1/tasks", lambda r: self._page(r, self.tasks.values())),
             ("GET", r"/api/v1/replays", lambda r: self._page(r, self.replays.values())),
             ("GET", r"/api/v1/evaluations", lambda r: self._page(r, self.evaluations.values())),
         )
@@ -301,6 +323,10 @@ class FakeKitaru:
     def _delete_worker(self, request, worker_id):
         if self.workers.pop(worker_id, None) is None:
             return httpx.Response(404, json={"detail": "Worker not found."})
+        # As in Kitaru, a task forgets a worker that is deleted.
+        for task in self.tasks.values():
+            if task["worker_id"] == worker_id:
+                task["worker_id"] = None
         return httpx.Response(204)
 
     def _cancel_run(self, request, run_id):

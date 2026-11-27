@@ -85,6 +85,22 @@ class KitaruApiTest(unittest.IsolatedAsyncioTestCase):
                          {"field": "experiment_run_id", "op": "eq", "value": "run-1"})
         self.assertEqual(self.requests[1].url.params["cursor"], "next")
 
+    async def test_the_tasks_of_a_job_are_listed_page_by_page_with_a_filter_on_the_job(self):
+        pages = {None: {"items": [{"id": "t1"}], "next_cursor": "next"}, "next": {"items": [{"id": "t2"}], "next_cursor": None}}
+        api = self.use(lambda request: httpx.Response(200, json=pages[request.url.params.get("cursor")]))
+        self.assertEqual([task["id"] for task in await api.list_tasks("job-1")], ["t1", "t2"])
+        self.assertEqual({r.url.path for r in self.requests}, {"/api/v1/tasks"})
+        for request in self.requests:
+            self.assertEqual(json.loads(request.url.params["filter"]), {"field": "job_id", "op": "eq", "value": "job-1"})
+
+    async def test_the_tasks_of_a_job_can_be_listed_for_one_kind(self):
+        api = self.use(lambda request: httpx.Response(200, json={"items": [], "next_cursor": None}))
+        self.assertEqual(await api.list_tasks("job-1", kind="agent"), [])
+        self.assertEqual(json.loads(self.requests[0].url.params["filter"]), {"and": [
+            {"field": "job_id", "op": "eq", "value": "job-1"},
+            {"field": "kind", "op": "eq", "value": "agent"},
+        ]})
+
     async def test_an_experiment_is_found_by_agent_and_name(self):
         api = self.use(lambda request: httpx.Response(200, json={"items": [{"id": "exp-1"}], "next_cursor": None}))
         self.assertEqual(await api.find_experiment("agent-1", "evalve-loop-exp-0"), {"id": "exp-1"})

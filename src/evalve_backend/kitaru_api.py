@@ -238,6 +238,12 @@ class KitaruApi:
     async def delete_worker(self, worker_id: str) -> None:
         await self._send("DELETE", f"/api/v1/workers/{worker_id}")
 
+    async def list_tasks(self, job_id: str, kind: str | None = None) -> list[dict]:
+        """The tasks of one job, each page. The agent task and the evaluator tasks of one Replay have
+        the same job. A task has `kind`, `status` and `worker_id`: the worker of its last attempt."""
+        of_job = condition("job_id", job_id)
+        return await self._list("/api/v1/tasks", of_job if kind is None else {"and": [of_job, condition("kind", kind)]})
+
     # The evidence of one run.
 
     async def list_replays(self, run_id: str) -> list[dict]:
