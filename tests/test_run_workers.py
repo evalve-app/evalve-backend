@@ -321,7 +321,8 @@ class ExecutorSettingKitaruTest(StepsTest):
         self.status(loop_id)
         self.assertEqual(self.outcomes(loop_id), [["green", None]])
         self.api.post(f"{LOOPS}/{loop_id}/cancel", headers=OWNER)
-        for method, path in (("GET", JOBS), ("POST", WORKERS), ("DELETE", ONE_WORKER)):
+        # The collect does no `worker_id` check: no job list and no task list.
+        for method, path in (("GET", JOBS), ("GET", "/api/v1/tasks"), ("POST", WORKERS), ("DELETE", ONE_WORKER)):
             self.assertEqual(self.kitaru.requests_to(method, path), [], path)
         self.assertEqual(self.store.run_workers(ACCOUNT, loop_id, 0, 1), [])
 

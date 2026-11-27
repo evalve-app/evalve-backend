@@ -2,6 +2,10 @@
 
 How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
+## Where they are
+
+This repo has no `GLOSSARY.md` and no `docs/adr/`. The domain docs of Evalve are in the repo `evalve-deploy`: `GLOSSARY.md` and `docs/adr/` at its root. On a machine with the sibling checkout, the paths are `../evalve-deploy/GLOSSARY.md` and `../evalve-deploy/docs/adr/`. Each "repo root" below is the root of `evalve-deploy`.
+
 ## Before exploring, read these
 
 - **`GLOSSARY.md`** at the repo root, or

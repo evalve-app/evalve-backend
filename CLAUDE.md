@@ -10,7 +10,11 @@ Default labels: needs-triage, needs-info, ready-for-agent, ready-for-human, wont
 
 ### Domain docs
 
-Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+The glossary and the ADRs of Evalve are in the repo `evalve-deploy`, not here: `../evalve-deploy/GLOSSARY.md` and `../evalve-deploy/docs/adr/`. Read them before work on a story that names a term or an ADR. See `docs/agents/domain.md`.
+
+### Tests and the OpenAPI file
+
+The commands are in `README.md`, section "Tests". Regenerate `openapi/evalve-backend.json` after a change to a route or to a model of the API.
 
 ### Git
 

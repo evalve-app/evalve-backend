@@ -9,6 +9,8 @@ A drive (`advance`) starts a Run. A refresh records a finished Run or an end sta
 With the executor setting `fargate`, a Loop task runs the Runs. A drive registers one Kitaru worker for
 each job of a Run and stores it, and the Loop task reads the workers as its Assignments. The Run has a
 deadline, and the call that collects a Run deletes its workers. A worker token is never logged.
+Before it stores a green or red result, the collect checks that the workers of the Run ran each task
+that gave the Run its score (the `worker_id` check). A Run that fails the check is `incomplete`.
 """
 
 from __future__ import annotations
@@ -37,6 +39,12 @@ logger = logging.getLogger(__name__)
 TERMINAL_RUN_STATUSES = {"completed", "failed", "canceled"}
 # The terminal statuses that a run reaches by itself.
 FINISHED_RUN_STATUSES = TERMINAL_RUN_STATUSES - {"canceled"}
+# The `worker_id` check reads a task with one of these kinds and the status `completed`.
+CHECKED_TASK_KINDS = {"agent", "evaluator"}
+FOREIGN_TASKS_REASON = (
+    "A worker that does not belong to this Loop ran {count} tasks of this Run. While a Loop runs, "
+    "stop each worker that has an `agent` claim, an `evaluator` claim or no claim."
+)
 # Where the Runs execute: on the Kitaru workers of the deployment, or in the Loop task of the Loop.
 # The story sc-283 makes this a deployment setting.
 Executor = Literal["kitaru", "fargate"]
@@ -360,8 +368,10 @@ class _Step:
     async def collect(self) -> bool:
         """Score the Run in flight if it ended, or if its deadline is past. False while it is still open.
 
-        The order matters: score, store the result and erase the worker tokens, then delete the workers.
-        Kitaru sets the `worker_id` of a task to null when its worker is deleted.
+        The order matters: score, do the `worker_id` check, store the result and erase the worker
+        tokens, then delete the workers. Kitaru sets the `worker_id` of a task to null when its worker
+        is deleted. A check that Kitaru cannot answer stops the call before the result is stored, so the
+        next call collects the Run again.
         """
         experiment = self.loop["experiments"][-1]
         run = experiment["runs"][-1]
@@ -387,8 +397,14 @@ class _Step:
             if stopped_at_deadline:
                 # The run is not completed, so the score is already `incomplete`.
                 result["run_error"] = self.deadline_reason(run)
-        # The `worker_id` check of the Run (sc-486) goes here. It can change the result to `incomplete`,
-        # and it must read the tasks before the workers are deleted.
+        # A Run that is already incomplete gets no check and no extra call.
+        if self.loop_task_workers and result["outcome"] in ("green", "red"):
+            foreign = await self.foreign_tasks(experiment["number"], run)
+            if foreign is None:
+                result = self.missing_result(run)
+            elif foreign:
+                result |= {"outcome": "incomplete", "run_error": FOREIGN_TASKS_REASON.format(count=foreign),
+                           "foreign_tasks": foreign}
         after = copy.deepcopy(state)
         after["experiments"][-1]["runs"][-1]["result"] = result
         needs_change = loop_rules.decide(self.config, after)["action"] == "needs_change"
@@ -399,6 +415,30 @@ class _Step:
             if await self.load():
                 await self.publish()
         return collected
+
+    async def foreign_tasks(self, experiment: int, run: dict) -> int | None:
+        """The `worker_id` check: the number of tasks of the Run that a worker outside the Loop ran.
+
+        The check reads each task with the kind `agent` or `evaluator` and the status `completed`. Such
+        a task passes when its worker is the worker that the store holds for its job. The jobs come
+        from Kitaru, because a job has no row when a registration stopped before its end. A task shows
+        the worker of its last attempt only (an accepted limit). None when the run is gone.
+        """
+        rows = await to_thread(self.store.run_workers, self.owner, self.loop_id, experiment, run["number"])
+        worker_of = {row["job_id"]: row["worker_id"] for row in rows}
+        try:
+            jobs = await self.api.list_run_jobs(run["run_id"])
+        except KitaruNotFound:
+            return None
+        foreign = 0
+        for job in jobs:
+            for task in await self.api.list_tasks(job["id"]):
+                if task["kind"] not in CHECKED_TASK_KINDS or task["status"] != "completed":
+                    continue
+                worker_id = task.get("worker_id")
+                if not worker_id or worker_id != worker_of.get(job["id"]):
+                    foreign += 1
+        return foreign
 
     @staticmethod
     def deadline_reason(run: dict) -> str:
