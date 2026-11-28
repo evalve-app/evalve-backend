@@ -20,7 +20,6 @@ import logging
 from asyncio import to_thread
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Literal
 
 import httpx
 
@@ -32,6 +31,7 @@ from evalve_backend.executor import (
 from evalve_backend.kitaru_api import KitaruApi, KitaruNotFound, KitaruRejected, KitaruTransient
 from evalve_backend.loop_steps import PreparedStart, StepUnavailable
 from evalve_backend.preflight import preflight, run_spec_hash
+from evalve_backend.settings import Executor
 from evalve_backend.store import RunPlan, RunWorker, Store
 
 logger = logging.getLogger(__name__)
@@ -45,9 +45,6 @@ FOREIGN_TASKS_REASON = (
     "A worker that does not belong to this Loop ran {count} tasks of this Run. While a Loop runs, "
     "stop each worker that has an `agent` claim, an `evaluator` claim or no claim."
 )
-# Where the Runs execute: on the Kitaru workers of the deployment, or in the Loop task of the Loop.
-# The story sc-283 makes this a deployment setting.
-Executor = Literal["kitaru", "fargate"]
 
 
 def rules_state(loop: dict) -> dict:

@@ -37,6 +37,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # httpx logs each request line at INFO. Keep sign-in checks out of the logs.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # botocore logs response bodies at DEBUG, and the body of an ECR answer holds a push credential.
+    for name in ("boto3", "botocore", "urllib3"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     if sys.argv[1:] == ["setup-database"]:
         return setup_database.run()
     try:

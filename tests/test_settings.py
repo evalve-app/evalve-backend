@@ -8,6 +8,12 @@ ENV = {
     "EVALVE_DB_USER": "evalve_admin",
     "EVALVE_DB_PWD": "database-password-value",
 }
+FARGATE = {
+    "EVALVE_EXECUTOR": "fargate",
+    "EVALVE_AWS_REGION": "eu-central-1",
+    "EVALVE_AGENT_IMAGE_REPOSITORY": "123456789012.dkr.ecr.eu-central-1.amazonaws.com/evalve/agents",
+    "EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN": "arn:aws:iam::123456789012:role/evalve-agent-image-push",
+}
 
 
 class SettingsTest(unittest.TestCase):
@@ -51,6 +57,50 @@ class SettingsTest(unittest.TestCase):
     def test_ports_must_be_numbers(self):
         with self.assertRaisesRegex(SettingsError, "EVALVE_PORT"):
             Settings.from_environment(ENV | {"EVALVE_PORT": "eighty"})
+
+    def test_the_executor_is_kitaru_by_default_and_reads_no_aws_setting(self):
+        settings = Settings.from_environment(ENV | {"EVALVE_AGENT_IMAGE_REPOSITORY": "not a repository"})
+        self.assertEqual(settings.executor, "kitaru")
+        self.assertIsNone(settings.agent_image_repository)
+
+    def test_the_executor_must_be_kitaru_or_fargate(self):
+        with self.assertRaisesRegex(SettingsError, "^EVALVE_EXECUTOR must be kitaru or fargate.$"):
+            Settings.from_environment(ENV | {"EVALVE_EXECUTOR": "lambda"})
+
+    def test_fargate_reads_the_aws_settings_of_the_agent_image_push(self):
+        settings = Settings.from_environment(ENV | FARGATE)
+        self.assertEqual(settings.executor, "fargate")
+        self.assertEqual(settings.aws_region, "eu-central-1")
+        self.assertEqual(settings.agent_image_repository, "123456789012.dkr.ecr.eu-central-1.amazonaws.com/evalve/agents")
+        self.assertEqual(settings.agent_image_registry, "123456789012.dkr.ecr.eu-central-1.amazonaws.com")
+        self.assertEqual(settings.agent_image_repository_name, "evalve/agents")
+        self.assertEqual(settings.agent_image_push_role_arn, "arn:aws:iam::123456789012:role/evalve-agent-image-push")
+
+    def test_fargate_without_the_push_role_does_not_start(self):
+        env = ENV | FARGATE
+        del env["EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN"]
+        with self.assertRaisesRegex(SettingsError, "^With EVALVE_EXECUTOR=fargate, set EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN.$"):
+            Settings.from_environment(env)
+
+    def test_fargate_names_each_missing_aws_setting(self):
+        with self.assertRaisesRegex(SettingsError, (
+            "^With EVALVE_EXECUTOR=fargate, set EVALVE_AWS_REGION, EVALVE_AGENT_IMAGE_REPOSITORY, "
+            "EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN.$"
+        )):
+            Settings.from_environment(ENV | {"EVALVE_EXECUTOR": "fargate"})
+
+    def test_the_aws_settings_must_have_their_format_and_the_error_holds_no_value(self):
+        for name, value in (
+            ("EVALVE_AWS_REGION", "Frankfurt"),
+            ("EVALVE_AGENT_IMAGE_REPOSITORY", "ghcr.io/evalve-app/agents"),
+            ("EVALVE_AGENT_IMAGE_REPOSITORY", "123456789012.dkr.ecr.eu-central-1.amazonaws.com"),
+            ("EVALVE_AGENT_IMAGE_REPOSITORY", "123456789012.dkr.ecr.eu-central-1.amazonaws.com/Agents"),
+            ("EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN", "arn:aws:iam::123456789012:user/someone"),
+        ):
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(SettingsError, f"^{name} must be ") as raised:
+                    Settings.from_environment(ENV | FARGATE | {name: value})
+                self.assertNotIn(value, str(raised.exception))
 
     def test_the_password_stays_out_of_the_repr_and_error_text(self):
         settings = Settings.from_environment(ENV)
