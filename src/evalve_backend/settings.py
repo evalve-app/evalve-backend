@@ -117,7 +117,7 @@ def _aws_settings(env: Mapping[str, str]) -> dict:
     if not _ECR_REPOSITORY.fullmatch(repository):
         raise SettingsError(
             "EVALVE_AGENT_IMAGE_REPOSITORY must be the URI of an ECR repository, "
-            "<account>.dkr.ecr.<region>.amazonaws.com/<name>."
+            "<AWS account ID>.dkr.ecr.<region>.amazonaws.com/<name>."
         )
     if not _IAM_ROLE_ARN.fullmatch(role_arn):
         raise SettingsError("EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN must be the ARN of an IAM role.")

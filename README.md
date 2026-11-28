@@ -146,7 +146,7 @@ Authorization: EvalveLoopTask <secret>
 `evalve build` pushes an agent image with only a Kitaru API key. It calls `POST /evalve/v1/agent-images/push-credential`, with no body, and logs in to ECR with the reply:
 
 ```json
-{"registry": "<account>.dkr.ecr.<region>.amazonaws.com",
+{"registry": "<AWS account ID>.dkr.ecr.<region>.amazonaws.com",
  "repository": "<name of the repository>",
  "username": "AWS",
  "password": "<the ECR token>",
@@ -154,7 +154,7 @@ Authorization: EvalveLoopTask <secret>
 ```
 
 - **Each active Kitaru account can call it,** with a Bearer credential or a dashboard session. The Evalve MCP has no tool for it.
-- **The token comes from the push-only role, never from the instance role.** An ECR token is as wide as its caller. With the instance role, the backend assumes the role in `EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN` for 900 s, with the session name `evalve-push-<account ID>`, and calls `ecr:GetAuthorizationToken` with the keys of that session. The token lives 12 hours, longer than the session.
+- **The token comes from the push-only role, never from the instance role.** An ECR token is as wide as its caller. With the instance role, the backend assumes the role in `EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN` for 900 s, with the session name `evalve-push-<Kitaru account ID>`, and calls `ecr:GetAuthorizationToken` with the keys of that session. The token lives 12 hours, longer than the session.
 - **Each call makes a new session.** The backend stores nothing and has no cache. The reply has `Cache-Control: no-store`.
 - **With the executor `kitaru`, the route answers `404`** ("This deployment has no agent image repository.") and makes no AWS call.
 - **An AWS error gives `503`** ("AWS could not give a push credential. Try again."). The SDK does not repeat a call.
@@ -183,7 +183,7 @@ The backend has no static AWS keys. It reads the instance role from IMDS only. E
 | `EVALVE_SESSION_COOKIE_NAME` | No | `evalve_session` | The name of Kitaru's dashboard session cookie. It must be the same as `KITARU_SERVER_AUTH_COOKIE_NAME`. An empty value turns cookie sign-in off |
 | `EVALVE_EXECUTOR` | No | `kitaru` | `kitaru` or `fargate`. With `kitaru`, the backend reads none of the AWS settings below and makes no AWS call. With `fargate`, it does not start when one of them is missing |
 | `EVALVE_AWS_REGION` | With `fargate` | | The AWS region of the deployment, for example `eu-central-1` |
-| `EVALVE_AGENT_IMAGE_REPOSITORY` | With `fargate` | | The URI of the one ECR repository of the agent images, `<account>.dkr.ecr.<region>.amazonaws.com/<name>` |
+| `EVALVE_AGENT_IMAGE_REPOSITORY` | With `fargate` | | The URI of the one ECR repository of the agent images, `<AWS account ID>.dkr.ecr.<region>.amazonaws.com/<name>` |
 | `EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN` | With `fargate` | | The push-only role that the backend assumes to give a push credential |
 
 ## Database setup

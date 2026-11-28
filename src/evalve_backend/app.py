@@ -33,7 +33,7 @@ def create_app(
     store: Store | None = None,
     loop_steps: LoopSteps | None = None,
     executor: Executor = "kitaru",
-    aws_client: aws.ClientFactory = aws.client,
+    make_aws_client: aws.ClientFactory = aws.client,
 ) -> FastAPI:
     """Build the app. `executor` says where the Loop steps execute the Runs. It is `kitaru` until the
     story sc-283 gives the Loop steps the setting `EVALVE_EXECUTOR`, and the tests of the workers of a
@@ -62,7 +62,7 @@ def create_app(
     app.state.loop_store = PostgresStore(settings) if store is None else store
     app.state.session_cookie_name = settings.session_cookie_name
     app.state.settings = settings
-    app.state.aws_client = aws_client
+    app.state.make_aws_client = make_aws_client
     app.state.loop_steps = loop_steps
     router = APIRouter(prefix=PREFIX)
 

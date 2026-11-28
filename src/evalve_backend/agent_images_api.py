@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from evalve_backend.auth import Account, require_account
-from evalve_backend.aws import ClientFactory, SessionCredentials
+from evalve_backend.aws import AwsKeys, ClientFactory
 from evalve_backend.loops_api import errors
 from evalve_backend.settings import Settings
 
@@ -51,17 +51,17 @@ def session_name(account_id: str) -> str:
     return f"evalve-push-{account_id}"
 
 
-def push_credential(settings: Settings, aws_client: ClientFactory, account_id: str) -> PushCredential:
+def push_credential(settings: Settings, make_aws_client: ClientFactory, account_id: str) -> PushCredential:
     """It blocks, so the route calls it off the event loop."""
     region = settings.aws_region
     try:
-        sts = aws_client("sts", region, None)
+        sts = make_aws_client("sts", region, None)
         session = sts.assume_role(
             RoleArn=settings.agent_image_push_role_arn, RoleSessionName=session_name(account_id),
             DurationSeconds=SESSION_SECONDS,
         )["Credentials"]
-        push_session = SessionCredentials(session["AccessKeyId"], session["SecretAccessKey"], session["SessionToken"])
-        [authorization] = aws_client("ecr", region, push_session).get_authorization_token()["authorizationData"]
+        push_session = AwsKeys(session["AccessKeyId"], session["SecretAccessKey"], session["SessionToken"])
+        [authorization] = make_aws_client("ecr", region, push_session).get_authorization_token()["authorizationData"]
         token = base64.b64decode(authorization["authorizationToken"], validate=True).decode()
         # botocore gives the time in the zone of the host. The reply and the log use UTC.
         expires_at = authorization["expiresAt"].astimezone(timezone.utc)
@@ -96,7 +96,7 @@ async def create_push_credential(
     if settings.executor != "fargate":
         raise HTTPException(status_code=404, detail=NO_REPOSITORY)
     try:
-        credential = await to_thread(push_credential, settings, request.app.state.aws_client, account.id)
+        credential = await to_thread(push_credential, settings, request.app.state.make_aws_client, account.id)
     except PushCredentialUnavailable:
         raise HTTPException(status_code=503, detail=AWS_UNAVAILABLE) from None
     # The reply holds a password, so no cache keeps it.
