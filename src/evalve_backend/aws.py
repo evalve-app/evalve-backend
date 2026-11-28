@@ -36,8 +36,8 @@ ClientFactory = Callable[[str, str, SessionCredentials | None], Any]
 
 
 def instance_role() -> SessionCredentials:
-    """The keys of the instance role, read from IMDS (with the IMDSv2 token) for each client."""
-    provider = InstanceMetadataProvider(iam_role_fetcher=InstanceMetadataFetcher(timeout=1, num_attempts=2))
+    """The keys of the instance role, read from IMDS for each client. Like an AWS call, the read is not repeated."""
+    provider = InstanceMetadataProvider(iam_role_fetcher=InstanceMetadataFetcher(timeout=1, num_attempts=1))
     found = provider.load()
     if found is None:
         raise NoCredentialsError

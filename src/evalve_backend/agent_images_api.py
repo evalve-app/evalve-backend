@@ -1,6 +1,6 @@
 """The push credential for the agent images: contract version 1 of `POST /v1/agent-images/push-credential`.
 
-The `evalve build` command pushes an agent image with only a Kitaru API key, so it asks the backend
+The `evalve build` subcommand pushes an agent image with only a Kitaru API key, so it asks the backend
 for an ECR token. An ECR token is as wide as its caller, so the backend never gives one of the
 instance role. It assumes the push-only role, which can push only to the one repository, and gets
 the token with the keys of that session. Each call makes a new session, and the backend stores
@@ -12,7 +12,7 @@ The password never goes into a log line or an error reply.
 import base64
 import logging
 from asyncio import to_thread
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -21,11 +21,12 @@ from pydantic import BaseModel
 
 from evalve_backend.auth import Account, require_account
 from evalve_backend.aws import ClientFactory, SessionCredentials
+from evalve_backend.loops_api import errors
 from evalve_backend.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(prefix="/v1/agent-images", tags=["Agent images"], responses=errors(401, 404, 503))
 
 SESSION_SECONDS = 900
 NO_REPOSITORY = "This deployment has no agent image repository."
@@ -51,20 +52,21 @@ def session_name(account_id: str) -> str:
 
 
 def push_credential(settings: Settings, aws_client: ClientFactory, account_id: str) -> PushCredential:
-    """Assume the push-only role for the account, and get an ECR token with the keys of that session."""
+    """It blocks, so the route calls it off the event loop."""
     region = settings.aws_region
     try:
         sts = aws_client("sts", region, None)
-        role = sts.assume_role(
+        session = sts.assume_role(
             RoleArn=settings.agent_image_push_role_arn, RoleSessionName=session_name(account_id),
             DurationSeconds=SESSION_SECONDS,
         )["Credentials"]
-        keys = SessionCredentials(role["AccessKeyId"], role["SecretAccessKey"], role["SessionToken"])
-        [authorization] = aws_client("ecr", region, keys).get_authorization_token()["authorizationData"]
+        push_session = SessionCredentials(session["AccessKeyId"], session["SecretAccessKey"], session["SessionToken"])
+        [authorization] = aws_client("ecr", region, push_session).get_authorization_token()["authorizationData"]
         token = base64.b64decode(authorization["authorizationToken"], validate=True).decode()
-        expires_at = authorization["expiresAt"]
+        # botocore gives the time in the zone of the host. The reply and the log use UTC.
+        expires_at = authorization["expiresAt"].astimezone(timezone.utc)
     except ClientError as error:
-        # The code names the refusal. The message of the error is not logged.
+        # The message of an AWS error can quote the request, so only its code is logged.
         logger.warning("AWS refused a push credential (%s).", error.response.get("Error", {}).get("Code"))
         raise PushCredentialUnavailable from None
     except (BotoCoreError, KeyError, TypeError, ValueError) as error:
@@ -72,7 +74,7 @@ def push_credential(settings: Settings, aws_client: ClientFactory, account_id: s
         raise PushCredentialUnavailable from None
     username, _, password = token.partition(":")
     if username != "AWS" or not password:
-        logger.warning("ECR answered with a token that is not for the user AWS.")
+        logger.warning("ECR answered with a token whose username is not AWS.")
         raise PushCredentialUnavailable
     logger.info("Gave a push credential for the agent images to the account %s. It expires at %s.",
                 account_id, expires_at.isoformat())
@@ -82,7 +84,7 @@ def push_credential(settings: Settings, aws_client: ClientFactory, account_id: s
     )
 
 
-@router.post("/v1/agent-images/push-credential")
+@router.post("/push-credential")
 async def create_push_credential(
     request: Request, response: Response, account: Annotated[Account, Depends(require_account)],
 ) -> PushCredential:

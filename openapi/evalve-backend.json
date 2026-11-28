@@ -1768,6 +1768,36 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -1779,7 +1809,10 @@
             "SessionCookie": []
           }
         ],
-        "summary": "Create Push Credential"
+        "summary": "Create Push Credential",
+        "tags": [
+          "Agent images"
+        ]
       }
     },
     "/evalve/v1/loops": {

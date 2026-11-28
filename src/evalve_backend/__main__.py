@@ -33,13 +33,17 @@ def wait_for_database(settings: Settings, timeout: float, sleep=time.sleep, cloc
             sleep(3)
 
 
-def main() -> int:
+def configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # httpx logs each request line at INFO. Keep sign-in checks out of the logs.
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    # botocore logs response bodies at DEBUG, and the body of an ECR answer holds a push credential.
+    # botocore logs response bodies at DEBUG, and the body of an STS or ECR answer holds a credential.
     for name in ("boto3", "botocore", "urllib3"):
         logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def main() -> int:
+    configure_logging()
     if sys.argv[1:] == ["setup-database"]:
         return setup_database.run()
     try:

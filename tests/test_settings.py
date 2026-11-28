@@ -89,9 +89,15 @@ class SettingsTest(unittest.TestCase):
         )):
             Settings.from_environment(ENV | {"EVALVE_EXECUTOR": "fargate"})
 
+    def test_the_repository_can_be_in_each_partition_of_aws(self):
+        for repository in ("123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/agents",
+                           "123456789012.dkr.ecr.eusc-de-east-1.amazonaws.eu/agents"):
+            with self.subTest(repository=repository):
+                settings = Settings.from_environment(ENV | FARGATE | {"EVALVE_AGENT_IMAGE_REPOSITORY": repository})
+                self.assertEqual(settings.agent_image_repository_name, "agents")
+
     def test_the_aws_settings_must_have_their_format_and_the_error_holds_no_value(self):
         for name, value in (
-            ("EVALVE_AWS_REGION", "Frankfurt"),
             ("EVALVE_AGENT_IMAGE_REPOSITORY", "ghcr.io/evalve-app/agents"),
             ("EVALVE_AGENT_IMAGE_REPOSITORY", "123456789012.dkr.ecr.eu-central-1.amazonaws.com"),
             ("EVALVE_AGENT_IMAGE_REPOSITORY", "123456789012.dkr.ecr.eu-central-1.amazonaws.com/Agents"),

@@ -11,12 +11,12 @@ from urllib.parse import urlsplit
 # agent images, so it reads the AWS settings; with `kitaru` it reads none of them.
 Executor = Literal["kitaru", "fargate"]
 
-# An ECR repository URI: the registry host of an AWS account and region, then the repository name.
+# An ECR repository URI: the registry host of an AWS account, then the repository name. The domain of
+# the host differs between the partitions of AWS, so only its start is checked.
 _ECR_REPOSITORY = re.compile(
-    r"(?P<registry>[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?)"
+    r"(?P<registry>[0-9]{12}\.dkr[.-]ecr\.[a-z0-9-]+(?:\.[a-z0-9-]+)+)"
     r"/(?P<name>(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*[a-z0-9]+(?:[._-][a-z0-9]+)*)"
 )
-_AWS_REGION = re.compile(r"[a-z]{2}(?:-[a-z]+)+-[0-9]")
 _IAM_ROLE_ARN = re.compile(r"arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]{1,512}")
 
 
@@ -47,7 +47,7 @@ class Settings:
     aws_region: str | None = None
     # The URI of the one ECR repository of the agent images.
     agent_image_repository: str | None = None
-    # The push-only role that the backend assumes to give a builder an ECR token (sc-487).
+    # The push-only role that the backend assumes to give `evalve build` an ECR token (sc-487).
     agent_image_push_role_arn: str | None = None
 
     @property
@@ -114,8 +114,6 @@ def _aws_settings(env: Mapping[str, str]) -> dict:
     if missing:
         raise SettingsError("With EVALVE_EXECUTOR=fargate, set " + ", ".join(missing) + ".")
     region, repository, role_arn = (env[name].strip() for name in required)
-    if not _AWS_REGION.fullmatch(region):
-        raise SettingsError("EVALVE_AWS_REGION must be an AWS region, for example eu-central-1.")
     if not _ECR_REPOSITORY.fullmatch(repository):
         raise SettingsError(
             "EVALVE_AGENT_IMAGE_REPOSITORY must be the URI of an ECR repository, "
