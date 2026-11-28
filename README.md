@@ -13,6 +13,7 @@ Every route sits under `/evalve`, so one hostname can serve Kitaru and Evalve.
 | `GET /evalve/health` | None | `200` with `"database": "ok"` when the backend can query its database. `503` when it can't. Both include `version` and `image`, so a deployment can confirm which build is serving. |
 | `GET /evalve/v1/me` | Kitaru credential or dashboard session | `200 {"id": "...", "name": "..."}` for the Kitaru account behind the credential. |
 | `POST /evalve/v1/loops/{loop_id}/task/poll` | Secret of the Loop task | The Assignments of the open Run of the Loop, for the Supervisor in the Loop task. See [The secret of a Loop task](#the-secret-of-a-loop-task). |
+| `POST /evalve/v1/agent-images/push-credential` | Kitaru credential or dashboard session | A short-lived ECR credential that can push to the one agent image repository, for `evalve build`. See [The push credential for agent images](#the-push-credential-for-agent-images). |
 
 The [Loop API contract](openapi/evalve-backend.json) covers start, list, status, Run evidence, Experiment proposals, cancellation, and the final report. Signed-in accounts can read all Loops. The list is newest first and supports an optional `owner_account_id` filter. Only the Loop owner (the account that started a Loop) can propose, cancel, drive or refresh it. A status call with a Bearer credential of the Loop owner drives the Loop: it records a finished Run and starts the next Run. A status call with a dashboard session of the Loop owner refreshes the Loop: it records a finished Run and applies an end state, and it starts no Run. A status read by another account returns stored results.
 
@@ -133,16 +134,37 @@ Authorization: EvalveLoopTask <secret>
 - **The route makes no call to Kitaru.** It checks the secret against the hash that the backend stores. The backend never stores or logs the secret.
 - **Only the newest Loop task of a running Loop has a valid secret,** while its state is `starting` or `alive`. A refused poll gets `401` with no reason.
 - **A poll reads state.** The reply has each Assignment of the open Run (`run_id`, `job_id`, `worker_id`, `worker_token`) and `run_deadline`. A second poll gets the same Assignments. The list is empty when no Run is open or the deadline is past.
-- **The backend registers the workers.** With the executor setting `fargate`, the call that drives a Loop registers one Kitaru worker for each job of a Run, with the credential of the Loop owner. Each worker claims only the agent task and the evaluator tasks of its job. A dashboard session registers no worker. The deployment setting for the executor comes with the Loop task ([sc-283](https://app.shortcut.com/team-4-1/story/283)); until then the backend uses the Kitaru workers and registers nothing.
+- **The backend registers the workers.** With the executor setting `fargate`, the call that drives a Loop registers one Kitaru worker for each job of a Run, with the credential of the Loop owner. Each worker claims only the agent task and the evaluator tasks of its job. A dashboard session registers no worker. The Loop steps read the setting `EVALVE_EXECUTOR` from the story of the Loop task ([sc-283](https://app.shortcut.com/team-4-1/story/283)) on; until then they use the Kitaru workers and register nothing, whatever the setting is.
 - **A Run has a deadline:** the expiry of its first worker token. Kitaru sets the lifetime (`KITARU_SERVER_WORKER_TOKEN_LIFETIME_SECONDS`, 3600 s by default). After the deadline, the next call from the Loop owner cancels a Run that is still open and records it as incomplete. A Run that finished before the deadline gets its score.
 - **The collect checks which worker ran each task (the `worker_id` check).** With the executor setting `fargate`, a Run that the score made green or red is checked before its result is stored. The backend reads the jobs of the Run and the tasks of each job from Kitaru. A task with the kind `agent` or `evaluator` and the status `completed` must have the worker that the backend registered for its job. If one task does not, the Run is `incomplete`, and its result has `foreign_tasks` (the number of such tasks) and a `run_error` that tells the Loop owner which workers to stop. If Kitaru cannot answer, the call answers 503 and stores no result, and the next call collects the Run. If Kitaru refuses the task list, the Loop ends as `failed`. A task shows only the worker of its last attempt.
 - **The call that collects a Run erases its worker tokens and then deletes its workers in Kitaru.** When Kitaru cannot delete a worker, each later call from the Loop owner tries again. The call that ends a Loop cancels a Run that is still open and deletes each worker that is left. The backend never logs a worker token.
 - **A poll with `"last": true` ends the secret.**
 - **A contract version that the backend does not support gets `409`,** and the Loop task becomes a failed start. The backend supports the versions from `MIN_CONTRACT_VERSION` to `MAX_CONTRACT_VERSION` (1 and 1).
 
+### The push credential for agent images
+
+`evalve build` pushes an agent image with only a Kitaru API key. It calls `POST /evalve/v1/agent-images/push-credential`, with no body, and logs in to ECR with the reply:
+
+```json
+{"registry": "<AWS account ID>.dkr.ecr.<region>.amazonaws.com",
+ "repository": "<name of the repository>",
+ "username": "AWS",
+ "password": "<the ECR token>",
+ "expires_at": "<time>"}
+```
+
+- **Each active Kitaru account can call it,** with a Bearer credential or a dashboard session. The Evalve MCP has no tool for it.
+- **The token comes from the push-only role, never from the instance role.** An ECR token is as wide as its caller. With the instance role, the backend assumes the role in `EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN` for 900 s, with the session name `evalve-push-<Kitaru account ID>`, and calls `ecr:GetAuthorizationToken` with the keys of that session. The token lives 12 hours, longer than the session.
+- **Each call makes a new session.** The backend stores nothing and has no cache. The reply has `Cache-Control: no-store`.
+- **With the executor `kitaru`, the route answers `404`** ("This deployment has no agent image repository.") and makes no AWS call.
+- **An AWS error gives `503`** ("AWS could not give a push credential. Try again."). The SDK does not repeat a call.
+- **No log line holds the password.** The backend logs the account ID and the expiry of each credential.
+
 ## Settings
 
 Read from the environment when the process starts.
+
+The backend has no static AWS keys. It reads the instance role from IMDS only. Each AWS call has a connect timeout of 3 s, a read timeout of 10 s and no SDK retry.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -159,6 +181,10 @@ Read from the environment when the process starts.
 | `EVALVE_DB_WAIT_SECONDS` | No | `120` | How long startup waits for PostgreSQL |
 | `EVALVE_IMAGE` | No | | The image reference this container was started from. The health route reports it |
 | `EVALVE_SESSION_COOKIE_NAME` | No | `evalve_session` | The name of Kitaru's dashboard session cookie. It must be the same as `KITARU_SERVER_AUTH_COOKIE_NAME`. An empty value turns cookie sign-in off |
+| `EVALVE_EXECUTOR` | No | `kitaru` | `kitaru` or `fargate`. With `kitaru`, the backend reads none of the AWS settings below and makes no AWS call. With `fargate`, it does not start when one of them is missing |
+| `EVALVE_AWS_REGION` | With `fargate` | | The AWS region of the deployment, for example `eu-central-1` |
+| `EVALVE_AGENT_IMAGE_REPOSITORY` | With `fargate` | | The URI of the one ECR repository of the agent images, `<AWS account ID>.dkr.ecr.<region>.amazonaws.com/<name>` |
+| `EVALVE_AGENT_IMAGE_PUSH_ROLE_ARN` | With `fargate` | | The push-only role that the backend assumes to give a push credential |
 
 ## Database setup
 

@@ -6,7 +6,8 @@ call that depends on it. The rules come from `loop_rules`; this module applies t
 
 A drive (`advance`) starts a Run. A refresh records a finished Run or an end state and starts no Run.
 
-With the executor setting `fargate`, a Loop task runs the Runs. A drive registers one Kitaru worker for
+With the executor `fargate`, a Loop task runs the Runs. The Loop steps get the executor from `create_app`;
+the story sc-283 gives them the setting `EVALVE_EXECUTOR`. A drive registers one Kitaru worker for
 each job of a Run and stores it, and the Loop task reads the workers as its Assignments. The Run has a
 deadline, and the call that collects a Run deletes its workers. A worker token is never logged.
 Before it stores a green or red result, the collect checks that the workers of the Run ran each task
@@ -20,7 +21,6 @@ import logging
 from asyncio import to_thread
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Literal
 
 import httpx
 
@@ -32,6 +32,7 @@ from evalve_backend.executor import (
 from evalve_backend.kitaru_api import KitaruApi, KitaruNotFound, KitaruRejected, KitaruTransient
 from evalve_backend.loop_steps import PreparedStart, StepUnavailable
 from evalve_backend.preflight import preflight, run_spec_hash
+from evalve_backend.settings import Executor
 from evalve_backend.store import RunPlan, RunWorker, Store
 
 logger = logging.getLogger(__name__)
@@ -45,9 +46,6 @@ FOREIGN_TASKS_REASON = (
     "A worker that does not belong to this Loop ran {count} tasks of this Run. While a Loop runs, "
     "stop each worker that has an `agent` claim, an `evaluator` claim or no claim."
 )
-# Where the Runs execute: on the Kitaru workers of the deployment, or in the Loop task of the Loop.
-# The story sc-283 makes this a deployment setting.
-Executor = Literal["kitaru", "fargate"]
 
 
 def rules_state(loop: dict) -> dict:

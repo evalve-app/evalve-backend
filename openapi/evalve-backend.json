@@ -947,6 +947,41 @@
         "title": "ProposeExperiment",
         "type": "object"
       },
+      "PushCredential": {
+        "description": "What `docker login` needs to push to the one agent image repository.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "registry": {
+            "title": "Registry",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "registry",
+          "repository",
+          "username",
+          "password",
+          "expires_at"
+        ],
+        "title": "PushCredential",
+        "type": "object"
+      },
       "ReplayPolicy": {
         "additionalProperties": true,
         "properties": {
@@ -1717,6 +1752,67 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/evalve/v1/agent-images/push-credential": {
+      "post": {
+        "description": "A short-lived ECR credential that can push to the one agent image repository and do nothing else.\n\nEach active Kitaru account can call it. The reply is new for each call and the backend keeps no copy.",
+        "operationId": "create_push_credential_evalve_v1_agent_images_push_credential_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushCredential"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          },
+          {
+            "CsrfToken": [],
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Create Push Credential",
+        "tags": [
+          "Agent images"
+        ]
       }
     },
     "/evalve/v1/loops": {

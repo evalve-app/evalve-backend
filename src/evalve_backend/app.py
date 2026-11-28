@@ -9,13 +9,14 @@ import httpx
 from fastapi import APIRouter, Depends, FastAPI
 from fastapi.responses import JSONResponse
 
-from evalve_backend import __version__, database
+from evalve_backend import __version__, aws, database
+from evalve_backend.agent_images_api import router as agent_images_router
 from evalve_backend.auth import CSRF_HEADER, Account, require_account
 from evalve_backend.loop_task_api import SECURITY_SCHEME as LOOP_TASK_SECRET, router as loop_task_router
 from evalve_backend.loops_api import router as loops_router
 from evalve_backend.loop_steps import LoopSteps
-from evalve_backend.settings import Settings
-from evalve_backend.steps import Executor, KitaruLoopSteps
+from evalve_backend.settings import Executor, Settings
+from evalve_backend.steps import KitaruLoopSteps
 from evalve_backend.store import PostgresStore, Store
 
 PREFIX = "/evalve"
@@ -32,9 +33,11 @@ def create_app(
     store: Store | None = None,
     loop_steps: LoopSteps | None = None,
     executor: Executor = "kitaru",
+    make_aws_client: aws.ClientFactory = aws.client,
 ) -> FastAPI:
-    """Build the app. `executor` says where the Runs execute. It is `kitaru` until the story sc-283
-    makes it a deployment setting, and the tests of the workers of a Run set `fargate`."""
+    """Build the app. `executor` says where the Loop steps execute the Runs. It is `kitaru` until the
+    story sc-283 gives the Loop steps the setting `EVALVE_EXECUTOR`, and the tests of the workers of a
+    Run set `fargate`. The push credential route already reads the setting."""
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # trust_env is off so a proxy variable can never reroute a credential.
@@ -58,6 +61,8 @@ def create_app(
     )
     app.state.loop_store = PostgresStore(settings) if store is None else store
     app.state.session_cookie_name = settings.session_cookie_name
+    app.state.settings = settings
+    app.state.make_aws_client = make_aws_client
     app.state.loop_steps = loop_steps
     router = APIRouter(prefix=PREFIX)
 
@@ -82,6 +87,7 @@ def create_app(
     app.include_router(router)
     app.include_router(loops_router, prefix=PREFIX)
     app.include_router(loop_task_router, prefix=PREFIX)
+    app.include_router(agent_images_router, prefix=PREFIX)
     build_contract = app.openapi
 
     def contract() -> dict:

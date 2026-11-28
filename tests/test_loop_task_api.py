@@ -190,6 +190,7 @@ class LoopTaskPollTest(unittest.TestCase):
             ("GET", "/evalve/v1/me", {}), ("GET", LOOPS, {}), ("GET", detail, {}), ("GET", f"{detail}/report", {}),
             ("GET", f"{detail}/experiments/0/runs/1", {}), ("POST", LOOPS, {"json": {}}),
             ("POST", f"{detail}/experiments", {"json": {}}), ("POST", f"{detail}/cancel", {}),
+            ("POST", "/evalve/v1/agent-images/push-credential", {}),
         ]
         paths = {path for path, operations in self.api.app.openapi()["paths"].items() if path != "/evalve/health"}
         # Each route of the API is in the list, except the poll route itself.
